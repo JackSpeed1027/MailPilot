@@ -128,7 +128,7 @@ def compose_page(row, cfg, token, draft=None, error=''):
     body = draft['body'] if draft else ''
     # Use raw escaping for editable user drafts, preserving exactly what was typed.
     escape = lambda value: html.escape(str(value), quote=True)
-    content = f'<a href="/messages/{row["id"]}">← 返回原邮件</a><section class="panel"><h2>写回复</h2><dl><dt>发件邮箱</dt><dd>{esc(account["label"])} &lt;{esc(account["email"])}&gt;</dd><dt>回复收件人</dt><dd>{esc(recipient)}</dd></dl><p class="small">优先使用原邮件 Reply-To，否则回复 From。只回复这一位，不自动抄送或引用原文，不发送附件。</p>'
+    content = f'<a class="back" href="/messages/{row["id"]}">← 返回原邮件</a><section class="panel"><h2>写回复</h2><div class="source-strip"><strong>发件邮箱</strong>{esc(account["label"])} &lt;{esc(account["email"])}&gt;<br><strong>收件人</strong>{esc(recipient)}</div><details><summary>回复范围</summary><p class="small">优先使用原邮件 Reply-To，否则回复 From。只回复这一位，不自动抄送或引用原文，不发送附件。</p></details>'
     if 'reply_to_addrs' not in message:
         content += '<div class="notice warn">这是旧版本邮件，未保存 Reply-To，当前按 From 回复。请核对收件地址，必要时到原邮箱回复。</div>'
     if error:

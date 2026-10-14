@@ -288,27 +288,31 @@ def configuration_page(controller, token, error='', submitted=None):
         if submitted is not None and kind != 'password':
             value = submitted.get(name, value)
         autocomplete = 'autocomplete="new-password"' if kind == 'password' else ''
+        status = ''
+        if kind == 'password' and hint.startswith(('已配置', '尚未配置', '无法读取')):
+            status = '<p class="small credential-status">' + esc(hint.split('。', 1)[0]) + '。</p>'
         return (f'<div class="field"><label for="{esc(name)}">{esc(label)}</label>'
                 f'<input id="{esc(name)}" name="{esc(name)}" type="{kind}" value="{esc(value)}" '
-                f'{autocomplete}>'
-                f'<p class="small">{esc(hint)}</p></div>')
+                f'{autocomplete}>' + status +
+                (f'<details class="field-help"><summary>填写说明</summary><p class="small">{esc(hint)}</p></details>' if hint else '') + '</div>')
     def check(name, label, value):
         if submitted is not None:
             value = submitted.get(name) == 'on'
         return f'<label class="check"><input type="checkbox" name="{name}" {"checked" if value else ""}><span>{esc(label)}</span></label>'
-    content = f'<div class="notice">{esc(controller.status)}</div>'
+    content = ''
     if error:
         content += f'<div class="notice warn" role="alert">{esc(error)}</div>'
-    content += '<p class="small">初次使用：先添加邮箱，再配置摘要模型；微信推送和智能回复可以按需开启。点击下方分组展开设置，最后统一保存。</p>'
+    if not cfg['accounts']:
+        content += '<p class="small">初次使用：先添加邮箱，再配置摘要模型。微信推送可稍后开启。</p>'
     content += f'<form class="settings" method="post" action="/settings"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="revision" value="{esc(revision)}">'
-    content += '<section class="panel" id="settings-mailboxes"><h2>1. 我的邮箱</h2><p class="small">显示名称是自己起的备注，例如“工作邮箱”。地址用于登录；邮件详情还会分别显示发件人、To / Cc 与实际收件账号。</p>'
+    content += '<section class="panel" id="settings-mailboxes"><h2>我的邮箱</h2>'
     for acc in cfg['accounts']:
         identity = acc['id']
-        content += f'<div class="mailbox"><h3>{esc(acc["email"])}</h3>'
+        content += f'<details class="mailbox"><summary><span class="account-avatar" aria-hidden="true">{esc(acc["label"][:1])}</span><span><strong>{esc(acc["label"])}</strong><span class="account-address">{esc(acc["email"])}</span></span><span class="account-edit">管理</span></summary><div class="account-fields">'
         content += text('label_' + identity, '显示名称', acc['label'])
         content += text('secret_' + identity, '邮箱授权码 / 应用专用密码', hint=credential_hint(acc['secret_env']) + ' 不会回显。QQ、163 使用 IMAP 授权码，Gmail 使用应用专用密码。', kind='password')
         content += check('cloud_' + identity, '允许普通邮件正文交给模型摘要、翻译（不含附件）', acc['allow_cloud'])
-        content += check('smtp_' + identity, '允许在本机手动发送回复（SMTP）', acc.get('smtp_enabled', False)) + '</div>'
+        content += check('smtp_' + identity, '允许在本机手动发送回复（SMTP）', acc.get('smtp_enabled', False)) + '</div></details>'
     content += '<details class="add-mailbox"' + (' open' if not cfg['accounts'] else '') + '><summary>＋ 添加一个邮箱</summary><div class="field"><label for="new_provider">邮箱服务商</label><select id="new_provider" name="new_provider"><option value="qq">QQ</option><option value="163">163</option><option value="gmail">Gmail</option></select></div>'
     content += text('new_email', '邮箱地址', hint='例如 yourname@qq.com。不添加时留空。', kind='email')
     content += text('new_label', '显示名称', hint='例如个人邮箱。留空使用邮箱地址。')
@@ -318,7 +322,7 @@ def configuration_page(controller, token, error='', submitted=None):
     content += '<p class="small">回复从实际收到邮件的账号发送。请在邮箱官网同时开启 SMTP，使用对应授权码/应用专用密码；这里只启用能力，不会自动发送。第一版仅单人文字回复，不抄送、不附附件。默认使用官方 SMTP 与 TLS 465。</p>'
     content += '<p class="small">设置入口：<a href="https://mail.qq.com/" target="_blank" rel="noreferrer">QQ 邮箱</a> · <a href="https://mail.163.com/" target="_blank" rel="noreferrer">163 邮箱</a> · <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer">Google 应用专用密码</a>。Gmail 需开启两步验证，部分组织账号不可用；连接还需本机网络能够访问 Gmail。</p></details></section>'
     llm = cfg['llm']
-    content += '<details class="panel setting-group" id="settings-model"><summary><span class="step-number">2</span><span><span class="group-title">摘要与外文阅读</span><span class="group-hint">API、全文翻译和调用上限</span></span></summary><div class="group-body">'
+    content += '<details class="panel setting-group" id="settings-model"><summary><span><span class="group-title">摘要与外文阅读</span><span class="group-hint">API、全文翻译和调用上限</span></span></summary><div class="group-body">'
     diagnostics = controller.store.model_diagnostics()
     content += f'<div class="notice">本机今日（{esc(diagnostics["day"])}）模型尝试 {diagnostics["attempts"]} 次，收到接口响应 {diagnostics["responses"]} 次。摘要、翻译和智能起草共享统计。这里不是服务商账单，也不代表每次输出都通过校验。</div>'
     content += check('llm_enabled', '启用模型（邮箱也要勾选云处理授权）', llm['enabled'])
@@ -334,17 +338,17 @@ def configuration_page(controller, token, error='', submitted=None):
     content += text('translation_max_chars', '单封全文翻译字符上限', llm.get('translation_max_chars', 30000), '范围 1000～100000。长邮件分段翻译，会增加调用次数；超过上限明确提示，不伪装成全文。', 'number')
     content += text('daily_attempt_limit', '每日模型调用尝试上限', llm['daily_attempt_limit'], '范围 1～10000；摘要、翻译分段和重试共享上限，不是金额预算。', 'number') + '</div></details>'
     channel = cfg['channel']
-    content += '<details class="panel setting-group" id="settings-push"><summary><span class="step-number">3</span><span><span class="group-title">微信消息推送</span><span class="group-hint">可选，把新邮件重点推送到手机</span></span></summary><div class="group-body">'
+    content += '<details class="panel setting-group" id="settings-push"><summary><span><span class="group-title">微信消息推送</span><span class="group-hint">可选，把新邮件重点推送到手机</span></span></summary><div class="group-body">'
     content += check('channel_enabled', '启用 WxPusher（关闭时邮件仍保存在本机）', channel['enabled'])
     content += text('uid', '接收人 UID', channel['uid'], '以 UID_ 开头。扫描你创建的应用订阅二维码后，在后台用户列表获取自己的 UID。')
     content += text('app_token', '应用 AppToken', hint=credential_hint(channel['token_env']) + ' 在应用管理后台获取；不是 UID。', kind='password')
     content += '<p class="small"><a href="https://wxpusher.zjiecode.com/" target="_blank" rel="noreferrer">WxPusher 官网</a> → 微信扫码登录 → 创建应用 → 复制 AppToken → 扫描应用订阅二维码 → 用户列表复制本人 UID。两个值分别填写在上方。开启推送会把消息内容交给 WxPusher；“通道已接受”还需在手机确认。</p></div></details>'
-    content += '<details class="panel setting-group" id="settings-privacy"><summary><span class="step-number">4</span><span><span class="group-title">收件与隐私</span><span class="group-hint">检查频率、密钥保存和处理范围</span></span></summary><div class="group-body">'
+    content += '<details class="panel setting-group" id="settings-privacy"><summary><span><span class="group-title">收件与隐私</span><span class="group-hint">检查频率、密钥保存和处理范围</span></span></summary><div class="group-body">'
     content += text('poll_seconds', '检查新邮件间隔（秒）', cfg['poll_seconds'], '建议 60；范围 15～3600。第一次连接跳过旧邮件，只收之后的新邮件。', 'number')
     content += check('remember', '将本次新输入的密钥保存到 Windows 凭据管理器', False)
     content += '<p class="small">默认仅本次运行使用；关闭程序后需重填。勾选后下次可自动读取，保存在当前 Windows 用户凭据中；不会写入 config.json，也不会在页面显示。留空不会修改已有凭据。若要将已保存密钥改为仅本次，请重新输入并取消勾选。也可在 Windows“凭据管理器 → Windows 凭据”中删除 MailPilot/ 条目。</p><p class="small">当前附件只显示名称，不解析图片或文件。配置保存不会自动重算旧邮件；已发出的请求无法撤回。</p></div></details>'
     preferences = cfg.get('reply_preferences', dict(tone='professional', length='balanced', language='same', signature='', instructions=''))
-    content += '<details class="panel setting-group" id="settings-reply"><summary><span class="step-number">5</span><span><span class="group-title">智能回复偏好</span><span class="group-hint">语气、语言和惯用署名</span></span></summary><div class="group-body"><p class="small">这是你明确设置的习惯，不会自动扫描历史邮件学习。仅点击“按我的偏好智能起草”时调用模型，最多3轮，与摘要/翻译共享每日上限。模型只有读取当前邮件和读取偏好两个工具，没有发信工具。</p>'
+    content += '<details class="panel setting-group" id="settings-reply"><summary><span><span class="group-title">智能回复偏好</span><span class="group-hint">语气、语言和惯用署名</span></span></summary><div class="group-body"><p class="small">这是你明确设置的习惯，不会自动扫描历史邮件学习。仅主动点击智能起草时调用模型，生成后需要你核对、确认发送。</p>'
     for name, label, values in [('tone', '回复语气', [('professional', '专业礼貌'), ('friendly', '亲切自然')]),
                                 ('length', '回复长度', [('brief', '简短'), ('balanced', '均衡'), ('detailed', '详细')]),
                                 ('language', '回复语言', [('same', '跟随原邮件'), ('zh', '中文'), ('en', '英文')])]:
@@ -355,12 +359,15 @@ def configuration_page(controller, token, error='', submitted=None):
         content += '</select></div>'
     content += text('reply_signature', '惯用署名', preferences['signature'], '最多200字，本机添加到智能草稿末尾，不发送给模型。')
     content += text('reply_instructions', '其他回复偏好', preferences['instructions'], '最多500字，例如“先回应对方问题，未确认的时间不要承诺”。不要填写密钥。此说明会交给模型。')
-    content += '</div></details><div class="settings-actions"><p class="small">修改后统一保存。密钥留空会保留已有凭据。</p><button class="primary" type="submit">保存并应用配置</button></div></form>'
+    content += '</div></details><div class="settings-actions"><p class="small">密钥留空，保留已有配置。</p><button class="primary" type="submit">保存并应用配置</button></div></form>'
     if error:
-        content = content.replace('<details ', '<details open ')
+        # Reveal editable groups without expanding every help paragraph.
+        content = content.replace('<details class="mailbox">', '<details open class="mailbox">')
+        content = content.replace('<details class="panel setting-group"', '<details open class="panel setting-group"')
+        content = content.replace('<details class="add-mailbox">', '<details open class="add-mailbox">')
         if submitted is not None:
-            content = content.replace('<p class="small">初次使用：', '<p class="small">未保存的普通字段已保留；新输入的授权码和密钥请重新填写。初次使用：', 1)
+            content = '<p class="small">普通字段已保留，新输入的密钥请重新填写。</p>' + content
             provider = submitted.get('new_provider', 'qq')
             if provider in PROVIDERS:
                 content = content.replace(f'<option value="{provider}">', f'<option value="{provider}" selected>', 1)
-    return layout(content, title='设置', active='settings', subtitle='在页面完成配置；密钥不回显，保存后自动应用。')
+    return layout(content, title='设置', active='settings', subtitle='管理邮箱、阅读和回复偏好。')

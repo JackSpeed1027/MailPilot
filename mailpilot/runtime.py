@@ -58,10 +58,16 @@ def safe_error(exc):
     return "处理异常；邮件将在下次循环重试"
 
 
-def process_pending(cfg, store, summarizer=None):
+def process_pending(cfg, store, summarizer=None, stop=None):
     summarizer = summarizer or Summarizer(cfg["llm"], store)
     count = 0
     for message_id, message in store.pending():
+        if stop is not None and stop.is_set():
+            break
+        if "accounts" in cfg:
+            account = next((a for a in cfg["accounts"] if a["id"] == message["account_id"]), None)
+            # Opting in later never grants consent retroactively to older intake.
+            message["allow_cloud"] = bool(message.get("allow_cloud") and account and account["allow_cloud"])
         result = store.previous_result(message) or summarizer.summarize(message)
         content, preview = render(message, result)
         store.complete(message_id, result, content, preview, cfg["channel"]["enabled"])
@@ -125,7 +131,7 @@ def run_forever(cfg, store, stop):
         def processor():
             while not stop.is_set():
                 try:
-                    count = process_pending(cfg, store)
+                    count = process_pending(cfg, store, stop=stop)
                     store.health("摘要处理", True)
                 except Exception as exc:
                     store.health("摘要处理", False, safe_error(exc))

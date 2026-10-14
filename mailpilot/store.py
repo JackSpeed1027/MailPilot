@@ -32,6 +32,7 @@ class Store:
                     output_tokens INTEGER, ok INTEGER DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS health (
                     name TEXT PRIMARY KEY, ok INTEGER, updated REAL, error TEXT);
+                CREATE INDEX IF NOT EXISTS messages_account_id ON messages(account,id DESC);
             """)
 
     @contextmanager
@@ -170,6 +171,47 @@ class Store:
                 o.id AS outbox_id,o.state AS delivery_state,o.error AS delivery_error
                 FROM messages m LEFT JOIN outbox o ON o.message_id=m.id
                 ORDER BY m.id DESC LIMIT ?""", (limit,))]
+
+    def browse(self, query="", account="", view="all", page=1, size=20):
+        """Search all stored mail, with bound SQL parameters and bounded page size."""
+        page = max(1, min(int(page), 1_000_000))
+        size = max(1, min(int(size), 100))
+        conditions, params = [], []
+        if account:
+            conditions.append("m.account=?")
+            params.append(account)
+        if query:
+            # Treat %, _ and backslash as literal search characters, not LIKE syntax.
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("""(COALESCE(json_extract(m.payload,'$.subject'),'') || ' ' ||
+                COALESCE(json_extract(m.payload,'$.from_addrs'),'') || ' ' ||
+                COALESCE(json_extract(m.payload,'$.received_account'),'') || ' ' ||
+                COALESCE(json_extract(m.result,'$.summary_zh'),'') || ' ' ||
+                COALESCE(json_extract(m.result,'$.action_summary'),'')) LIKE ? ESCAPE '\\'""")
+            params.append("%" + escaped + "%")
+        if view == "action":
+            conditions.append("json_extract(m.result,'$.needs_action')=1")
+        elif view == "attention":
+            conditions.append("(o.state IN ('failed','unknown') OR json_extract(m.result,'$.mode')='fallback')")
+        elif view == "attachments":
+            conditions.append("json_array_length(json_extract(m.payload,'$.attachments'))>0")
+        clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+        join = " FROM messages m LEFT JOIN outbox o ON o.message_id=m.id"
+        with self.connect() as db:
+            total = db.execute("SELECT COUNT(*)" + join + clause, params).fetchone()[0]
+            pages = max(1, (total + size - 1) // size)
+            page = min(page, pages)
+            rows = db.execute("""SELECT m.id,m.payload,m.result,m.state,m.created,
+                o.id AS outbox_id,o.state AS delivery_state,o.error AS delivery_error""" + join + clause +
+                " ORDER BY m.id DESC LIMIT ? OFFSET ?", params + [size, (page - 1) * size]).fetchall()
+        return {"rows": [dict(r) for r in rows], "total": total, "page": page, "pages": pages}
+
+    def mailbox_options(self):
+        with self.connect() as db:
+            rows = db.execute("""SELECT m.account,json_extract(m.payload,'$.account_label') label
+                FROM messages m JOIN (SELECT account,MAX(id) id FROM messages GROUP BY account) latest
+                ON m.id=latest.id ORDER BY m.account""").fetchall()
+            return [dict(r) for r in rows]
 
     def detail(self, message_id):
         with self.connect() as db:

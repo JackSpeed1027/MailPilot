@@ -22,7 +22,7 @@ def example():
         "poll_seconds": 60, "data_dir": "data", "max_message_bytes": 2_000_000,
         "llm": {"enabled": True, "base_url": "https://api.deepseek.com/v1",
                 "model": "deepseek-chat", "key_env": "MAILPILOT_LLM_KEY",
-                "daily_attempt_limit": 100},
+                "daily_attempt_limit": 100, "summary_style": "balanced"},
         "channel": {"enabled": True, "uid": "请填写本人UID",
                     "token_env": "MAILPILOT_WXPUSHER_TOKEN"},
     }
@@ -78,9 +78,11 @@ def load(path):
         if type(cfg[name]["enabled"]) is not bool:
             raise ValueError(f"{name}.enabled 应为布尔值")
     llm = cfg["llm"]
-    for key, value in {"daily_attempt_limit": 100, "model": "", "base_url": "",
+    for key, value in {"daily_attempt_limit": 100, "model": "", "base_url": "", "summary_style": "balanced",
                        "key_env": "MAILPILOT_LLM_KEY"}.items():
         llm.setdefault(key, value)
+    if llm["summary_style"] not in ("brief", "balanced", "detailed"):
+        raise ValueError("summary_style 应是 brief、balanced 或 detailed")
     if llm["enabled"]:
         if not isinstance(llm["model"], str) or not llm["model"]:
             raise ValueError("启用摘要模型时需指定 llm.model")

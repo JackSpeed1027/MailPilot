@@ -235,7 +235,7 @@ def main(argv=None):
             print("任务已重新入队，下次 run 时发送。")
             return 0
         if args.command == "web":
-            server = make_server(store, args.port, args.demo)
+            server = make_server(store, args.port, args.demo, args.config if not args.demo else None)
             print(f"控制台：http://127.0.0.1:{server.server_port}（Ctrl+C 关闭）")
             try:
                 server.serve_forever()
@@ -251,12 +251,13 @@ def main(argv=None):
             stop = threading.Event()
             server = None
             if not args.no_web:
-                server = make_server(store, args.port)
+                server = make_server(store, args.port, config_path=args.config, on_settings_saved=stop.set)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 print(f"控制台：http://127.0.0.1:{server.server_port}")
             print("已启动：默认每 60 秒轮询；Ctrl+C 停止。首次连接跳过历史邮件。")
             try:
                 run_forever(cfg, store, stop)
+                print("\n已停止；如刚保存设置，请重新启动以加载新配置。")
             except KeyboardInterrupt:
                 stop.set()
                 print("\n已停止。")

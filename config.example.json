@@ -1,0 +1,43 @@
+{
+  "accounts": [
+    {
+      "id": "qq",
+      "provider": "qq",
+      "label": "QQ 主邮箱",
+      "email": "you@qq.com",
+      "secret_env": "MAILPILOT_QQ_SECRET",
+      "allow_cloud": false
+    },
+    {
+      "id": "163",
+      "provider": "163",
+      "label": "163 邮箱",
+      "email": "you@163.com",
+      "secret_env": "MAILPILOT_163_SECRET",
+      "allow_cloud": false
+    },
+    {
+      "id": "gmail",
+      "provider": "gmail",
+      "label": "Gmail 邮箱",
+      "email": "you@gmail.com",
+      "secret_env": "MAILPILOT_GMAIL_SECRET",
+      "allow_cloud": false
+    }
+  ],
+  "poll_seconds": 60,
+  "data_dir": "data",
+  "max_message_bytes": 2000000,
+  "llm": {
+    "enabled": true,
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "key_env": "MAILPILOT_LLM_KEY",
+    "daily_attempt_limit": 100
+  },
+  "channel": {
+    "enabled": true,
+    "uid": "UID_请替换为本人UID",
+    "token_env": "MAILPILOT_WXPUSHER_TOKEN"
+  }
+}

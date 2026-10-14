@@ -147,6 +147,9 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="创建配置模板；不会覆盖已有配置")
     sub.add_parser("setup", help="配置向导，不保存密码")
+    ui = sub.add_parser("ui", help="打开页面配置邮箱、API 与推送，并自动启动收件")
+    ui.add_argument("--port", type=int, default=8788)
+    ui.add_argument("--no-browser", action="store_true")
     doc = sub.add_parser("doctor", help="配置和凭据自检")
     doc.add_argument("--online", action="store_true", help="实际测试 IMAP 只读登录")
     doc.add_argument("--prompt-secrets", action="store_true")
@@ -179,6 +182,23 @@ def main(argv=None):
             return 0
         if args.command == "setup":
             setup(args.config)
+            return 0
+        if args.command == "ui":
+            from .ui import UIController
+            import webbrowser
+            controller = UIController(args.config)
+            server = None
+            try:
+                server = make_server(controller.store, args.port, config_path=args.config, controller=controller)
+                url = f"http://127.0.0.1:{server.server_port}/settings"
+                print(f"配置页面：{url}；在页面填写凭据，Ctrl+C 关闭。")
+                if not args.no_browser:
+                    webbrowser.open(url)
+                server.serve_forever()
+            finally:
+                if server:
+                    server.server_close()
+                controller.close()
             return 0
         config_parent = Path(args.config).resolve().parent
         if args.command == "demo":

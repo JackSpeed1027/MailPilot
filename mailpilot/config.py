@@ -22,7 +22,8 @@ def example():
         "poll_seconds": 60, "data_dir": "data", "max_message_bytes": 2_000_000,
         "llm": {"enabled": True, "base_url": "https://api.deepseek.com/v1",
                 "model": "deepseek-chat", "key_env": "MAILPILOT_LLM_KEY",
-                "daily_attempt_limit": 100, "summary_style": "balanced"},
+                "daily_attempt_limit": 100, "summary_style": "balanced", "translation_enabled": True,
+                "translation_chunk_chars": 2000, "translation_max_chars": 30000},
         "channel": {"enabled": True, "uid": "请填写本人UID",
                     "token_env": "MAILPILOT_WXPUSHER_TOKEN"},
     }
@@ -83,6 +84,14 @@ def load(path):
         llm.setdefault(key, value)
     if llm["summary_style"] not in ("brief", "balanced", "detailed"):
         raise ValueError("summary_style 应是 brief、balanced 或 detailed")
+    llm.setdefault("translation_enabled", True)
+    if type(llm["translation_enabled"]) is not bool:
+        raise ValueError("translation_enabled 应为 true 或 false")
+    for field, default, minimum, maximum in [("translation_chunk_chars", 2000, 500, 3000),
+                                              ("translation_max_chars", 30000, 1000, 100000)]:
+        llm.setdefault(field, default)
+        if type(llm[field]) is not int or not minimum <= llm[field] <= maximum:
+            raise ValueError(f"{field} 应在 {minimum}～{maximum} 之间")
     if llm["enabled"]:
         if not isinstance(llm["model"], str) or not llm["model"]:
             raise ValueError("启用摘要模型时需指定 llm.model")
@@ -96,6 +105,11 @@ def load(path):
     channel.setdefault("uid", "")
     if channel["enabled"] and (not isinstance(channel["uid"], str) or not channel["uid"].startswith("UID_")):
         raise ValueError("启用 WxPusher 时需配置本人 UID（以 UID_ 开头）")
+    names = [a['secret_env'] for a in accounts] + [llm['key_env'], channel['token_env']]
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,99}', name) for name in names):
+        raise ValueError('凭据名称只能使用字母、数字和下划线，不能以数字开头')
+    if len(names) != len(set(names)):
+        raise ValueError('每个邮箱、模型和推送必须使用独立的凭据名称')
     cfg["data_dir"] = str((path.parent / cfg.get("data_dir", "data")).resolve())
     return cfg
 

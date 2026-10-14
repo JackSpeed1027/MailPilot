@@ -122,7 +122,34 @@ def detail_page(row, demo=False):
         content += f'<div class="todo"><strong>下一步：</strong>{esc(result.get("action_summary", ""))}</div>'
     else:
         content += f'<p class="small">{"尚未完成摘要分析，不能据此判断没有待办。" if result.get("mode") == "fallback" or not result else "未识别到明确待办；重要事项请核对原邮件。"}</p>'
-    content += '</section><section class="panel"><details><summary>查看清洗后正文</summary><p class="small">纯文本展示，远程图片不会加载。</p><pre>' + esc(msg['body'] or '无可展示正文／敏感内容已隐藏') + '</pre></details></section></div><div><section class="panel"><h2>邮件来源</h2><dl>'
+    if result.get('summary_scope') == 'partial':
+        content += '<div class="notice warn">摘要只覆盖部分正文，请结合原文阅读。</div>'
+    content += '</section>'
+    language = result.get('source_language', 'unknown')
+    names = {'en': '英语', 'ja': '日语', 'ko': '韩语', 'mixed': '混合语言', 'other': '其他外文', 'zh': '中文', 'unknown': '尚未确认'}
+    status = result.get('translation_status', 'legacy')
+    if language != 'zh':
+        labels = {'complete': '全文翻译已完成', 'partial': '翻译未完成：仅展示已完成部分', 'failed': '翻译失败',
+                  'disabled': '全文翻译未开启', 'blocked': '当前未进行翻译', 'too_long': '超过翻译长度上限',
+                  'unknown_language': '语言尚未确认', 'legacy': '旧版本记录，尚无全文翻译'}
+        content += f'<section class="panel"><h2>中文全文翻译</h2><p class="small">原文语言：{esc(names.get(language, "其他外文"))} · {esc(labels.get(status, status))}</p>'
+        if result.get('subject_zh'):
+            content += f'<h3>译文主题：{esc(result["subject_zh"])}</h3>'
+        if result.get('translation_zh'):
+            content += '<pre>' + esc(result['translation_zh']) + '</pre>'
+        else:
+            content += '<p class="muted">暂无全文译文。检查云处理授权、API Key、全文翻译开关与每日调用上限。</p>'
+        if result.get('translation_note'):
+            content += f'<div class="notice warn">{esc(result["translation_note"])}</div>'
+        if result.get('translation_chunks_total'):
+            content += f'<p class="small">已完成 {result.get("translation_chunks_done", 0)} / {result["translation_chunks_total"]} 段。机器翻译供阅读参考，重要信息请核对原文。</p>'
+        content += '</section>'
+    content += '<section class="panel"><h2>邮件原文（纯文本）</h2><p class="small">保留清洗后的原文，不加载远程图片，不执行邮件中的内容。</p><pre>' + esc(msg['body'] or '无可展示正文／敏感内容已隐藏') + '</pre>'
+    if msg.get('body_truncated'):
+        content += '<div class="notice warn">正文超过本机保留上限，这里不是完整原文。请到邮箱查看原邮件。</div>'
+    if msg.get('sensitive'):
+        content += '<p class="small">本机隐私规则已保护验证或登录内容，未交给模型。旧版本误判的记录没有保存正文，请重新发送测试邮件。</p>'
+    content += '</section></div><div><section class="panel"><h2>邮件来源</h2><dl>'
     content += ''.join(f'<dt>{esc(name)}</dt><dd>{esc(value)}</dd>' for name, value in metadata)
     content += '</dl><p class="small">转发、别名或密送时，To 地址可能与实际收件账号不同。</p></section><section class="panel"><h2>附件</h2>'
     if msg.get('attachments'):
@@ -131,7 +158,7 @@ def detail_page(row, demo=False):
         content += '<p class="small">没有附件或未获取到附件信息。</p>'
     if row.get('delivery_error'):
         content += f'<p class="bad">{esc(row["delivery_error"])} · 推送任务 {row["outbox_id"]}</p>'
-    return layout(content + '</section></div></div>', demo, title=msg['subject'], subtitle='摘要、待办与来源分开展示，原文按需展开。')
+    return layout(content + '</section></div></div>', demo, title=msg['subject'], subtitle='中文摘要、全文译文和原文分开展示，来源信息清楚可查。')
 
 
 def settings_page(cfg=None, revision='', token='', editable=False, demo=False, error=''):
@@ -153,10 +180,10 @@ def settings_page(cfg=None, revision='', token='', editable=False, demo=False, e
     return layout(content, demo, 'settings', '偏好设置', '让每个邮箱按照你的习惯工作。')
 
 
-def make_server(store, port=8788, demo=False, config_path=None, on_settings_saved=None):
+def make_server(store, port=8788, demo=False, config_path=None, on_settings_saved=None, controller=None):
     settings = Settings(config_path) if config_path and not demo else None
     token = secrets.token_urlsafe(32)
-    editable = bool(settings and on_settings_saved)
+    editable = bool(controller or (settings and on_settings_saved))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -166,6 +193,10 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
             return self.headers.get('Host') in {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
 
         def settings_view(self, error='', status=200):
+            if controller:
+                from .ui import configuration_page
+                self.respond(configuration_page(controller, token, error), 'text/html; charset=utf-8', status)
+                return
             try:
                 cfg, revision = settings.read() if settings else (None, '')
             except (ValueError, OSError):
@@ -184,11 +215,17 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                     cfg = settings.read()[0] if settings else None
                 except (ValueError, OSError):
                     cfg = None
-                self.respond(dashboard(store, demo, params, cfg), 'text/html; charset=utf-8')
+                page = dashboard(store, demo, params, cfg)
+                if controller:
+                    page = page.replace('<main>', '<main><div class="notice">' + esc(controller.status) + ' <a href="/settings">打开邮箱与 API 配置</a></div>', 1)
+                self.respond(page, 'text/html; charset=utf-8')
             elif target.path == '/settings':
                 self.settings_view()
             elif target.path == '/api/status':
-                self.respond(json.dumps(store.status(), ensure_ascii=False), 'application/json; charset=utf-8')
+                state = store.status()
+                if controller:
+                    state['runtime'] = controller.status
+                self.respond(json.dumps(state, ensure_ascii=False), 'application/json; charset=utf-8')
             elif target.path.startswith('/messages/') and target.path[10:].isdigit() and len(target.path) < 30:
                 row = store.detail(int(target.path[10:]))
                 if row:
@@ -224,12 +261,18 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 if not secrets.compare_digest(fields.get('csrf', ''), token):
                     self.send_error(403)
                     return
-                settings.save(fields)
-            except (ValueError, UnicodeError):
-                self.settings_view('未保存：字段格式无效或配置已被修改。请刷新后检查备注、间隔、上限和摘要风格。', 400)
+                if controller:
+                    controller.save(fields)
+                else:
+                    settings.save(fields)
+            except (ValueError, UnicodeError) as exc:
+                self.settings_view(('未保存：' + str(exc)) if controller and isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else '未保存：字段格式无效或配置已被修改。请刷新后检查备注、间隔、上限和摘要风格。', 400)
                 return
             except OSError:
                 self.settings_view('未保存：配置无法写入，请检查目录权限与磁盘空间。', 500)
+                return
+            if controller:
+                self.settings_view('配置已保存。系统正在应用；请稍后刷新查看运行状态。密钥不会回显。')
                 return
             on_settings_saved()
             self.respond(layout('<section class="panel"><h2>设置已保存</h2><p>收件进程正在停止。请等终端显示“已停止”后重新运行启动脚本并输入凭据。</p><p class="small">进行中的请求会等待结束。已发送内容无法撤回，新设置不自动重算历史邮件。</p></section>', title='设置已保存'), 'text/html; charset=utf-8')

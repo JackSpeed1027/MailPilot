@@ -1,3 +1,3 @@
-"""MailPilot: deterministic mail intake with optional model summaries."""
+"""MailPilot: controlled local mail intake, reading and notifications."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

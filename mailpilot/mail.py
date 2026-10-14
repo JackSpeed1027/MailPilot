@@ -1,19 +1,40 @@
 """Parse untrusted mail as data. Sensitive messages never enter model input."""
 
 import hashlib
+import html as html_module
 import re
+import secrets
 from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses
 from html.parser import HTMLParser
 
-SENSITIVE = re.compile(
-    r"验证码|校验码|动态码|登录码|一次性密码|密码重置|重置密码|登录链接|验证链接|"
-    r"verification|security\s+code|one[ -]?time|passcode|\bOTP\b|\b2FA\b|"
-    r"password\s+reset|reset.{0,20}password|magic\s+link|sign[ -]?in\s+link|"
-    r"login\s+(code|link)|verify.{0,30}(account|email)|PIN\s+code",
-    re.I,
-)
+AUTH_CODE = re.compile(
+    r"验证码|校验码|动态码|登录码|一次性密码|認証コード|認証番号|確認コード|ワンタイムパスワード|"
+    r"verification\s+code|security\s+code|one[ -]?time\s+(?:password|code)|passcode|\bOTP\b|\b2FA\b|"
+    r"login\s+code|PIN\s+code", re.I)
+CODE_VALUE = re.compile(r"(?<![\w])(?:\d{4,8}|(?=[A-Za-z\d]{6,16}(?!\w))(?=[A-Za-z\d]*\d)[A-Za-z\d]+)(?![\w])")
+AUTH_LINK = re.compile(
+    r"重置密码|密码重置|登录链接|验证链接|パスワード.{0,12}リセット|ログインリンク|"
+    r"reset\s+your\s+password|magic\s+link|sign[ -]?in\s+link|login\s+link|"
+    r"click.{0,50}(?:sign[ -]?in|verify\s+(?:your\s+)?(?:account|email))", re.I)
+
+
+def sensitive_reason(subject, alternatives):
+    # Inspect decoded text, including hidden alternatives, not CSS class names or URLs alone.
+    source_text = html_module.unescape("\n".join([subject, *alternatives]))
+    text = re.sub(r"<[^>]*>", " ", source_text)
+    for match in AUTH_CODE.finditer(text):
+        nearby = text[max(0, match.start() - 80):match.end() + 160]
+        if CODE_VALUE.search(nearby):
+            return "auth_code"
+    if AUTH_LINK.search(text) and re.search(r"https?://", source_text, re.I):
+        return "auth_link"
+    # Explicit authentication request phrasing also protects image-only code mail.
+    if re.search(r"(?:your|use\s+this)\s+(?:login\s+)?(?:verification\s+code|passcode)|"
+                 r"(?:本次|您的|あなたの).{0,12}(?:登录码|验证码|認証コード)", text, re.I):
+        return "auth_request"
+    return ""
 
 
 class TextHTML(HTMLParser):
@@ -83,7 +104,8 @@ def parse(raw, account, uidvalidity, uid):
         html_text.append("".join(parser.parts))
     body = clean("\n".join(plain or html_text))
     # Inspect all textual alternatives, including hidden HTML, before persistence.
-    sensitive = bool(SENSITIVE.search("\n".join([subject, *plain, *html])))
+    reason = sensitive_reason(subject, [*plain, *html])
+    sensitive = bool(reason)
     from_addrs = addresses(msg, "From")
     to_addrs = addresses(msg, "To")
     cc_addrs = addresses(msg, "Cc")
@@ -96,11 +118,55 @@ def parse(raw, account, uidvalidity, uid):
         "fingerprint": fingerprint, "from_addrs": from_addrs,
         "to_addrs": to_addrs, "cc_addrs": cc_addrs,
         "subject": "验证／登录类邮件（敏感内容已隐藏）" if sensitive else subject[:500],
-        "body": "" if sensitive else body[:30000],
+        "body": "" if sensitive else body[:100000],
+        "body_truncated": not sensitive and len(body) > 100000,
+        "body_chars": 0 if sensitive else len(body),
         "date_header": str(msg.get("Date", ""))[:100],
         "attachments": [] if sensitive else attachments[:30],
         "sensitive": sensitive, "allow_cloud": account.get("allow_cloud", False),
+        "sensitive_reason": reason,
     }
+
+
+def guess_language(text):
+    """A routing hint; model language detection can refine it, not a universal detector."""
+    kana = len(re.findall(r"[\u3040-\u30ff]", text))
+    hangul = len(re.findall(r"[\uac00-\ud7af]", text))
+    han = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    if kana >= 3:
+        return "ja"
+    if hangul >= 3:
+        return "ko"
+    if han and latin > max(40, han * 2):
+        return "mixed"
+    if han:
+        return "zh"
+    if latin >= 10:
+        return "en"
+    if any(char.isalpha() for char in text):
+        return "other"
+    return "unknown"
+
+
+def protect_translation(text):
+    """Send opaque placeholders instead of common private identifiers; restore locally."""
+    prefix = 'MPPRIVATE' + secrets.token_hex(6).upper()
+    mapping = {}
+    pattern = r"https?://\S+|\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|(?<!\d)\d{11,19}(?!\d)"
+    def replace(match):
+        key = f'[{prefix}_{len(mapping)}]'
+        mapping[key] = match.group(0)
+        return key
+    return re.sub(pattern, replace, text), mapping
+
+
+def restore_translation(text, mapping):
+    if any(text.count(key) != 1 for key in mapping):
+        raise ValueError("翻译未完整保留私密字段占位符")
+    for key, value in mapping.items():
+        text = text.replace(key, value)
+    return text
 
 
 def model_text(text):

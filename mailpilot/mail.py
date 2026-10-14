@@ -91,14 +91,17 @@ def addresses(msg, name):
 
 
 def parse(raw, account, uidvalidity, uid):
+    from .attachments import preview, MAX_FILES, MAX_TOTAL_CHARS
     msg = BytesParser(policy=policy.default).parsebytes(raw)
     subject = readable(msg.get("Subject", "（无主题）"))
-    plain, html, attachments = [], [], []
+    plain, html, attachments, attachment_previews, attachment_parts = [], [], [], [], []
     for part in msg.walk():
         if part.is_multipart():
             continue
         if part.get_content_disposition() == "attachment" or part.get_filename():
-            attachments.append(part.get_filename() or "未命名附件")
+            attachments.append(str(part.get_filename() or "未命名附件")[:300])
+            if len(attachment_parts) < MAX_FILES:
+                attachment_parts.append(part)
             continue
         if part.get_content_type() not in ("text/plain", "text/html"):
             continue
@@ -117,6 +120,12 @@ def parse(raw, account, uidvalidity, uid):
     # Inspect all textual alternatives, including hidden HTML, before persistence.
     reason = sensitive_reason(subject, [*plain, *html])
     sensitive = bool(reason)
+    if not sensitive:
+        preview_chars = 0
+        for part in attachment_parts:
+            value = preview(part, account.get('attachment_preview', False), MAX_TOTAL_CHARS - preview_chars)
+            preview_chars += value['chars']
+            attachment_previews.append(value)
     from_addrs = addresses(msg, "From")
     to_addrs = addresses(msg, "To")
     cc_addrs = addresses(msg, "Cc")
@@ -136,6 +145,9 @@ def parse(raw, account, uidvalidity, uid):
         "body_chars": 0 if sensitive else len(body),
         "date_header": str(msg.get("Date", ""))[:100],
         "attachments": [] if sensitive else attachments[:30],
+        'attachment_previews': [] if sensitive else attachment_previews,
+        'attachment_preview_enabled': bool(account.get('attachment_preview', False)),
+        'attachment_previews_limited': not sensitive and len(attachments) > MAX_FILES,
         "sensitive": sensitive, "allow_cloud": account.get("allow_cloud", False),
         "sensitive_reason": reason,
     }

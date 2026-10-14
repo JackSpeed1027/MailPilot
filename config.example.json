@@ -7,7 +7,8 @@
       "email": "you@qq.com",
       "secret_env": "MAILPILOT_QQ_SECRET",
       "allow_cloud": false,
-      "smtp_enabled": false
+      "smtp_enabled": false,
+      "attachment_preview": false
     },
     {
       "id": "163",
@@ -16,7 +17,8 @@
       "email": "you@163.com",
       "secret_env": "MAILPILOT_163_SECRET",
       "allow_cloud": false,
-      "smtp_enabled": false
+      "smtp_enabled": false,
+      "attachment_preview": false
     },
     {
       "id": "gmail",
@@ -25,7 +27,8 @@
       "email": "you@gmail.com",
       "secret_env": "MAILPILOT_GMAIL_SECRET",
       "allow_cloud": false,
-      "smtp_enabled": false
+      "smtp_enabled": false,
+      "attachment_preview": false
     }
   ],
   "poll_seconds": 60,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mailpilot"
-version = "0.7.0"
+version = "0.8.0"
 description = "个人多邮箱中文摘要与 WxPusher 通知"
 requires-python = ">=3.11"
 dependencies = []

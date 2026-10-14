@@ -63,22 +63,23 @@ class UIController:
             allowed = {'csrf', 'revision', 'poll_seconds', 'daily_attempt_limit', 'summary_style',
                        'llm_enabled', 'base_url', 'model', 'model_key', 'channel_enabled', 'uid',
                        'app_token', 'remember', 'translation_enabled', 'translation_max_chars',
-                       'new_provider', 'new_email', 'new_label', 'new_secret', 'new_cloud', 'new_smtp',
+                       'new_provider', 'new_email', 'new_label', 'new_secret', 'new_cloud', 'new_smtp', 'new_attachment_preview',
                        'reply_tone', 'reply_length', 'reply_language', 'reply_signature', 'reply_instructions'}
             secret_values = {}
             for acc in cfg['accounts']:
                 identity = acc['id']
-                allowed.update({'label_' + identity, 'cloud_' + identity, 'secret_' + identity, 'smtp_' + identity})
+                allowed.update({'label_' + identity, 'cloud_' + identity, 'secret_' + identity, 'smtp_' + identity, 'attachment_' + identity})
                 acc['label'] = fields.get('label_' + identity, '').strip()
                 if not 1 <= len(acc['label']) <= 60:
                     raise ValueError('邮箱显示名称请填写 1～60 个字符，例如工作邮箱。')
                 acc['allow_cloud'] = fields.get('cloud_' + identity) == 'on'
                 acc['smtp_enabled'] = fields.get('smtp_' + identity) == 'on'
+                acc['attachment_preview'] = fields.get('attachment_' + identity) == 'on'
                 secret_values[acc['secret_env']] = fields.get('secret_' + identity, '').strip()
             if set(fields) - allowed:
                 raise ValueError('页面包含不支持的设置，请刷新后重试。')
             for key in allowed:
-                if key.endswith('_enabled') or key in {'remember', 'new_cloud', 'new_smtp'} or key.startswith(('cloud_', 'smtp_')):
+                if key.endswith('_enabled') or key in {'remember', 'new_cloud', 'new_smtp', 'new_attachment_preview'} or key.startswith(('cloud_', 'smtp_', 'attachment_')):
                     if fields.get(key, 'off') not in {'on', 'off'}:
                         raise ValueError('开关格式无效，请刷新页面。')
             if fields.get('new_email', '').strip():
@@ -98,7 +99,8 @@ class UIController:
                     raise ValueError('新邮箱显示名称不能超过 60 个字符。')
                 cfg['accounts'].append(dict(id=identity, provider=provider, email=email,
                                             label=label, secret_env=name, allow_cloud=fields.get('new_cloud') == 'on',
-                                            smtp_enabled=fields.get('new_smtp') == 'on'))
+                                            smtp_enabled=fields.get('new_smtp') == 'on',
+                                            attachment_preview=fields.get('new_attachment_preview') == 'on'))
                 secret_values[name] = fields.get('new_secret', '').strip()
             try:
                 cfg['poll_seconds'] = int(fields['poll_seconds'])
@@ -354,13 +356,15 @@ def configuration_page(controller, token, error='', submitted=None):
         content += text('label_' + identity, '显示名称', acc['label'])
         content += text('secret_' + identity, '邮箱授权码 / 应用专用密码', hint=credential_hint(acc['secret_env']) + ' 不会回显。QQ、163 使用 IMAP 授权码，Gmail 使用应用专用密码。', kind='password')
         content += check('cloud_' + identity, '允许普通邮件正文用于云端摘要、翻译与智能助手（不含附件）', acc['allow_cloud'])
-        content += check('smtp_' + identity, '允许在本机手动发送回复（SMTP）', acc.get('smtp_enabled', False)) + '</div></details>'
+        content += check('smtp_' + identity, '允许在本机手动发送回复（SMTP）', acc.get('smtp_enabled', False))
+        content += check('attachment_' + identity, '在本机预览新邮件的 TXT / CSV / Markdown 附件（不上传模型）', acc.get('attachment_preview', False)) + '</div></details>'
     content += '<details class="add-mailbox"' + (' open' if not cfg['accounts'] else '') + '><summary>＋ 添加一个邮箱</summary><div class="field"><label for="new_provider">邮箱服务商</label><select id="new_provider" name="new_provider"><option value="qq">QQ</option><option value="163">163</option><option value="gmail">Gmail</option></select></div>'
     content += text('new_email', '邮箱地址', hint='例如 yourname@qq.com。不添加时留空。', kind='email')
     content += text('new_label', '显示名称', hint='例如个人邮箱。留空使用邮箱地址。')
     content += text('new_secret', '邮箱授权码 / 应用专用密码', hint='需先在邮箱官网启用 IMAP。不是邮箱的普通登录密码。', kind='password')
     content += check('new_cloud', '允许这个新邮箱的普通邮件用于云端摘要、翻译与智能助手', False)
     content += check('new_smtp', '允许这个新邮箱在本机手动发送回复（SMTP）', False)
+    content += check('new_attachment_preview', '在本机预览新邮件的文字附件（不上传模型）', False)
     content += '<p class="small">回复从实际收到邮件的账号发送。请在邮箱官网同时开启 SMTP，使用对应授权码/应用专用密码；这里只启用能力，不会自动发送。第一版仅单人文字回复，不抄送、不附附件。默认使用官方 SMTP 与 TLS 465。</p>'
     content += '<p class="small">设置入口：<a href="https://mail.qq.com/" target="_blank" rel="noreferrer">QQ 邮箱</a> · <a href="https://mail.163.com/" target="_blank" rel="noreferrer">163 邮箱</a> · <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer">Google 应用专用密码</a>。Gmail 需开启两步验证，部分组织账号不可用；连接还需本机网络能够访问 Gmail。</p></details></section>'
     llm = cfg['llm']
@@ -388,7 +392,7 @@ def configuration_page(controller, token, error='', submitted=None):
     content += '<details class="panel setting-group" id="settings-privacy"><summary><span><span class="group-title">收件与隐私</span><span class="group-hint">检查频率、密钥保存和处理范围</span></span></summary><div class="group-body">'
     content += text('poll_seconds', '检查新邮件间隔（秒）', cfg['poll_seconds'], '建议 60；范围 15～3600。第一次连接跳过旧邮件，只收之后的新邮件。', 'number')
     content += check('remember', '将本次新输入的密钥保存到 Windows 凭据管理器', False)
-    content += '<p class="small">默认仅本次运行使用；关闭程序后需重填。勾选后下次可自动读取，保存在当前 Windows 用户凭据中；不会写入 config.json，也不会在页面显示。留空不会修改已有凭据。若要将已保存密钥改为仅本次，请重新输入并取消勾选。也可在 Windows“凭据管理器 → Windows 凭据”中删除 MailPilot/ 条目。</p><p class="small">当前附件只显示名称，不解析图片或文件。配置保存不会自动重算旧邮件；已发出的请求无法撤回。</p></div></details>'
+    content += '<p class="small">默认仅本次运行使用；关闭程序后需重填。勾选后下次可自动读取，保存在当前 Windows 用户凭据中；不会写入 config.json，也不会在页面显示。留空不会修改已有凭据。若要将已保存密钥改为仅本次，请重新输入并取消勾选。也可在 Windows“凭据管理器 → Windows 凭据”中删除 MailPilot/ 条目。</p><p class="small">附件文字预览按邮箱在“管理”中开启，默认关闭。仅支持新邮件的 TXT / CSV / Markdown，每个最多256KB、12000字符；不解析PDF或图片，不上传模型。关闭后历史提取文字仍保存在本机，不补提取旧邮件。配置保存不会自动重算旧邮件；已发出的请求无法撤回。</p></div></details>'
     preferences = cfg.get('reply_preferences', dict(tone='professional', length='balanced', language='same', signature='', instructions=''))
     content += '<details class="panel setting-group" id="settings-reply"><summary><span><span class="group-title">智能回复偏好</span><span class="group-hint">语气、语言和惯用署名</span></span></summary><div class="group-body"><p class="small">这是你明确设置的习惯，不会自动扫描历史邮件学习。仅主动点击智能起草时调用模型，生成后需要你核对、确认发送。</p>'
     for name, label, values in [('tone', '回复语气', [('professional', '专业礼貌'), ('friendly', '亲切自然')]),

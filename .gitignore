@@ -9,3 +9,18 @@ __pycache__/
 .venv/
 
 .idea/
+
+# Personal state, generated files and old local archives
+docs/source-*.zip
+*.sqlite3*
+.settings-*.json
+config.*.json
+!config.example.json
+dist/
+build/
+.env.*
+*.pem
+*.key
+*.eml
+*.msg
+*.mbox

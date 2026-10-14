@@ -182,7 +182,7 @@ def detail_page(row, demo=False, can_reply=False, filters=None):
         content += f'<p class="bad">{esc(row["delivery_error"])}</p>'
     content += '</details>'
     if msg.get('attachments'):
-        content += '<section class="panel"><h2>附件</h2><ul class="file-list">' + ''.join(f'<li>{esc(name)}</li>' for name in msg['attachments']) + '</ul><p class="small">只显示文件名，尚未解析内容。</p></section>'
+        content += attachment_section(msg)
     if can_reply and row.get('replies'):
         content += '<details class="panel source-details"><summary>回复记录</summary>'
         from .reply import REPLY_STATES
@@ -190,6 +190,25 @@ def detail_page(row, demo=False, can_reply=False, filters=None):
             content += f'<p><a href="/replies/{esc(draft["id"])}">{esc(REPLY_STATES[draft["state"]])} · {esc(draft["subject"])}</a></p>'
         content += '</details>'
     return layout(content + '</div></div>', demo, active=filters.get('view', 'all') if filters.get('view', 'all') in VIEWS else 'all', title=msg['subject'])
+
+
+def attachment_section(msg):
+    labels = {'ready': '本机文字预览', 'partial': '部分文字', 'disabled': '未开启预览',
+              'unsupported': '暂不支持', 'too_large': '超过大小上限', 'unreadable': '无法识别文字',
+              'protected': '隐私保护', 'limit': '达到预览上限', 'empty': '无文字', 'legacy': '旧版本记录'}
+    content = '<section class="panel"><h2>附件</h2><p class="small">仅本机文字预览，不上传模型，不保存原文件。</p>'
+    previews = msg.get('attachment_previews', [])
+    for index, name in enumerate(msg['attachments']):
+        value = previews[index] if index < len(previews) else {'state': 'legacy' if 'attachment_previews' not in msg else 'limit', 'text': '', 'note': '未保留可用预览。'}
+        content += f'<details class="attachment-preview"><summary><span>{esc(str(name)[:300])}</span><span class="tag">{esc(labels.get(value["state"], "未解析"))}</span></summary>'
+        if value.get('text'):
+            content += '<pre>' + esc(value['text']) + '</pre>'
+        content += f'<p class="small">{esc(value.get("note", ""))}</p></details>'
+    if msg.get('attachment_previews_limited'):
+        content += '<p class="small">每封只预览前10个附件。更多文件请到原邮箱查看。</p>'
+    if 'attachment_previews' not in msg:
+        content += '<p class="small">旧邮件只保存了附件名称，不会因后来打开开关而自动解析。</p>'
+    return content + '</section>'
 
 
 def settings_page(cfg=None, revision='', token='', editable=False, demo=False, error=''):

@@ -13,7 +13,7 @@ def example():
     return {
         "accounts": [
             {"id": provider, "provider": provider, "label": label, "email": email,
-             "secret_env": env, "allow_cloud": False, "smtp_enabled": False}
+             "secret_env": env, "allow_cloud": False, "smtp_enabled": False, 'attachment_preview': False}
             for provider, label, email, env in [
                 ("qq", "QQ 主邮箱", "you@qq.com", "MAILPILOT_QQ_SECRET"),
                 ("163", "163 邮箱", "you@163.com", "MAILPILOT_163_SECRET"),
@@ -58,6 +58,9 @@ def load(path):
         acc.setdefault("port", 993)
         acc.setdefault("allow_cloud", False)
         acc.setdefault('smtp_enabled', False)
+        acc.setdefault('attachment_preview', False)
+        if type(acc['attachment_preview']) is not bool:
+            raise ValueError('attachment_preview 应为 true 或 false')
         acc.setdefault('smtp_host', SMTP_HOSTS.get(acc.get('provider'), ''))
         if type(acc['smtp_enabled']) is not bool:
             raise ValueError('smtp_enabled 应为 true 或 false')

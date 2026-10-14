@@ -134,7 +134,7 @@ def compose_page(row, cfg, token, draft=None, error=''):
     if error:
         content += f'<div class="notice warn">{esc(error)}</div>'
     if not draft and cfg['llm']['enabled'] and account['allow_cloud'] and message.get('allow_cloud') and len(message.get('body', '')) <= 12000 and not message.get('body_truncated'):
-        content += f'<form method="post" action="/messages/{row["id"]}/reply/ai"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="draft_id" value="{identity}"><p class="small">智能起草将这封已授权的普通邮件交给模型。最多3轮，有调用费用，生成结果需核对，不会发送。</p><button class="button" type="submit">按我的偏好智能起草</button></form><hr>'
+        content += f'<form method="post" action="/messages/{row["id"]}/reply/ai" data-loading-text="正在智能起草…"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="draft_id" value="{identity}"><p class="small">智能起草将这封已授权的普通邮件交给模型。最多3轮，有调用费用，生成结果需核对，不会发送。</p><button class="button" type="submit">按我的偏好智能起草</button></form><hr>'
     elif not draft:
         content += '<p class="small">智能起草需要启用模型、邮箱当前与收件时均已授权云处理，且完整原文不超过12000字符。当前可直接手动写回复。</p>'
     content += f'<form class="settings" method="post" action="/messages/{row["id"]}/reply"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="draft_id" value="{identity}"><input type="hidden" name="revision" value="{escape(revision)}"><div class="field"><label for="reply_subject">回复主题</label><input id="reply_subject" name="subject" required maxlength="300" value="{escape(subject)}"></div><div class="field"><label for="reply_body">回复正文</label><textarea id="reply_body" name="body" rows="12" maxlength="16000" required>{escape(body)}</textarea><p class="small">发送的是这里填写的原文，不会自动翻译或由模型改写。草稿保存在本机。</p></div><button class="primary" type="submit">保存草稿并预览</button></form></section>'
@@ -160,7 +160,7 @@ def review_page(draft, token, error=''):
             content += '</li>'
         content += '</ol><p class="small">这里是实际工具与请求记录，不是模型内部思维。</p></details>'
     if draft['state'] == 'draft':
-        content += f'<div class="notice">请核对发件邮箱、收件人和全文。点击下面按钮会真实发送邮件。</div><a class="button" href="/replies/{identity}?edit=1">修改草稿</a><form method="post" action="/replies/{identity}/send"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="revision" value="{draft["revision"]}"><button class="primary" type="submit">确认发送这封回复</button></form>'
+        content += f'<div class="notice">请核对发件邮箱、收件人和全文。点击下面按钮会真实发送邮件。</div><a class="button" href="/replies/{identity}?edit=1">修改草稿</a><form method="post" action="/replies/{identity}/send" data-loading-text="正在提交回复…"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="revision" value="{draft["revision"]}"><button class="primary" type="submit">确认发送这封回复</button></form>'
     else:
         content += '<p class="small">同一草稿不能再次提交。服务器接受不代表对方已读或必然投递到收件箱；本机保存发送记录，不承诺原邮箱“已发送”文件夹一定同步。</p>'
     return layout(content + '</section>', title='回复预览与发送状态', subtitle='核对草稿；只有你点击确认发送，才会提交给邮箱服务器。')

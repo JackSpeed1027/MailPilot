@@ -1,0 +1,11 @@
+config.json
+*.validation.json
+data/
+data-demo/
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+.idea/

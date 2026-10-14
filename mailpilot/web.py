@@ -36,11 +36,12 @@ def layout(content, demo=False, active="all", title="邮件简报", subtitle="")
         'attention': '<circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/>',
         'attachments': '<path d="m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l8-8"/>',
         'settings': '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="currentColor"/><circle cx="15" cy="12" r="2" fill="currentColor"/><circle cx="9" cy="18" r="2" fill="currentColor"/>',
+        'assistant': '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
     }
-    names = dict(VIEWS, settings='设置')
+    names = dict(VIEWS, assistant='智能助手', settings='设置')
     nav = ''
     for key, name in names.items():
-        href = '/settings' if key == 'settings' else link(view=key)
+        href = '/' + key if key in ('settings', 'assistant') else link(view=key)
         current = ' aria-current="page"' if active == key else ''
         nav += f'<a class="nav-{key} {"active" if active == key else ""}" href="{esc(href)}"{current}><svg viewBox="0 0 24 24" aria-hidden="true">{paths[key]}</svg><span>{name}</span></a>'
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#173e33"><title>MailPilot · {esc(title)}</title><style>{STYLE}</style></head><body><a class="skip" href="#content">跳到主要内容</a><div class="shell"><aside class="sidebar"><a class="brand" href="/" aria-label="MailPilot 邮件首页"><span class="brand-mark" aria-hidden="true">✉</span><span class="logo">MailPilot</span></a><nav class="nav" aria-label="主导航">{nav}</nav></aside><main id="content"><header><div><h1>{esc(title)}</h1>{('<div class="muted">' + esc(subtitle) + '</div>') if subtitle else ''}</div><a class="button refresh" href="" aria-label="刷新当前页面">刷新 ↻</a></header>{'<div class="notice warn">演示模式：固定合成内容，不会联网或发送通知。</div>' if demo else ''}{content}<footer>MailPilot · 本机邮件阅读</footer></main></div></body></html>'''
@@ -286,6 +287,19 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 self.respond(page, 'text/html; charset=utf-8')
             elif target.path == '/settings':
                 self.settings_view()
+            elif target.path == '/assistant':
+                if not controller:
+                    self.respond(layout('<div class="notice">请启动正式工作台使用智能助手。</div>', active='assistant', title='智能助手'), 'text/html; charset=utf-8')
+                else:
+                    from .assistant import ask_page
+                    self.respond(ask_page(controller, token), 'text/html; charset=utf-8')
+            elif re.fullmatch('/assistant/[0-9a-f]{32}', target.path) and controller:
+                from .assistant import result_page
+                row = store.assistant_run(target.path.rsplit('/', 1)[1])
+                if row:
+                    self.respond(result_page(controller, row), 'text/html; charset=utf-8')
+                else:
+                    self.send_error(404)
             elif target.path == '/api/status':
                 state = store.status()
                 if controller:
@@ -309,7 +323,8 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 return
             path = urlparse(self.path).path
             reply_route = bool(controller and re.fullmatch(r'/messages/\d+/reply(?:/ai)?|/replies/[0-9a-f]{32}/send', path))
-            if path != '/settings' and not reply_route:
+            assistant_route = bool(controller and path == '/assistant')
+            if path != '/settings' and not reply_route and not assistant_route:
                 self.send_error(404)
                 return
             if self.headers.get('Origin') != 'http://' + self.headers.get('Host', ''):
@@ -331,6 +346,14 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 fields = {key: value[0] for key, value in values.items()}
                 if not secrets.compare_digest(fields.get('csrf', ''), token):
                     self.send_error(403)
+                    return
+                if assistant_route:
+                    identity = controller.ask_assistant(fields)
+                    self.send_response(303)
+                    self.send_header('Location', '/assistant/' + identity)
+                    self.send_header('Content-Length', '0')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.end_headers()
                     return
                 if reply_route:
                     from .reply import save_draft
@@ -356,18 +379,30 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 else:
                     settings.save(fields)
             except (ValueError, UnicodeError) as exc:
+                if assistant_route:
+                    from .assistant import ask_page
+                    self.respond(ask_page(controller, token, str(exc) if isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else '字段编码无效。', fields), 'text/html; charset=utf-8', 400)
+                    return
                 if reply_route:
                     self.reply_view(path, '操作未完成：' + (str(exc) if isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else '字段编码无效，请重新填写。'), 400, submitted=fields if path.endswith('/reply') else None)
                     return
                 self.settings_view(('未保存：' + str(exc)) if controller and isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else '未保存：字段格式无效或配置已被修改。请刷新后检查备注、间隔、上限和摘要风格。', 400, submitted=fields)
                 return
             except OSError:
+                if assistant_route:
+                    from .assistant import ask_page
+                    self.respond(ask_page(controller, token, '本机存储失败，请检查磁盘和权限。', fields), 'text/html; charset=utf-8', 500)
+                    return
                 if reply_route:
                     self.reply_view(path, '本机保存失败，请检查磁盘权限或空间；不要重复发送，先核对草稿状态。', 500)
                     return
                 self.settings_view('未保存：配置无法写入，请检查目录权限与磁盘空间。', 500)
                 return
             except Exception:
+                if assistant_route:
+                    from .assistant import ask_page
+                    self.respond(ask_page(controller, token, '助手处理异常，请查看最近的问题或重新检查本机状态。', fields), 'text/html; charset=utf-8', 500)
+                    return
                 if reply_route:
                     self.reply_view(path, '处理异常。请核对草稿与发送状态；结果不确定时不要直接重发。', 500)
                 else:
@@ -380,13 +415,17 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
             self.respond(layout('<section class="panel"><h2>设置已保存</h2><p>收件进程正在停止。请等终端显示“已停止”后重新运行启动脚本并输入凭据。</p><p class="small">进行中的请求会等待结束。已发送内容无法撤回，新设置不自动重算历史邮件。</p></section>', title='设置已保存'), 'text/html; charset=utf-8')
 
         def respond(self, content, mime, status=200):
+            nonce = secrets.token_urlsafe(24)
+            if mime.startswith('text/html'):
+                from .interactions import SCRIPT
+                content = content.replace('</body>', f'<script nonce="{nonce}">{SCRIPT}</script></body>', 1)
             body = content.encode('utf-8')
             self.send_response(status)
             self.send_header('Content-Type', mime)
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header('Content-Security-Policy', f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
 

@@ -41,6 +41,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS agent_runs (
                     id TEXT PRIMARY KEY, message_id INTEGER, state TEXT, trace TEXT, error TEXT,
                     created REAL, updated REAL);
+                CREATE TABLE IF NOT EXISTS assistant_runs (
+                    id TEXT PRIMARY KEY, question TEXT, scope TEXT, state TEXT,
+                    answer TEXT, trace TEXT, error TEXT, created REAL, updated REAL);
             """)
 
     @contextmanager
@@ -59,6 +62,50 @@ class Store:
             db.execute("""UPDATE outbox SET state='unknown',
                 error='进程在发送期间停止，需人工检查'
                 WHERE state='sending'""")
+
+    def search_assistant(self, accounts, since, query='', action_only=False, limit=10):
+        """Bound SQL and filter cloud consent BEFORE any rows reach a model."""
+        if not accounts:
+            return []
+        pairs = ' OR '.join('(m.account=? AND lower(json_extract(m.payload,\'$.received_account\'))=?)' for _ in accounts)
+        params = [v for a in accounts for v in (a['id'], a['email'].lower())]
+        conditions = [f'({pairs})', 'm.created>=?', "json_extract(m.payload,'$.allow_cloud')=1",
+                      "COALESCE(json_extract(m.payload,'$.sensitive'),0)=0"]
+        params.append(since)
+        if query:
+            escaped = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            conditions.append("""(COALESCE(json_extract(m.payload,'$.subject'),'') || ' ' ||
+                COALESCE(json_extract(m.payload,'$.body'),'') || ' ' ||
+                COALESCE(json_extract(m.result,'$.summary_zh'),'')) LIKE ? ESCAPE '\\'""")
+            params.append('%' + escaped + '%')
+        if action_only:
+            conditions.append("json_extract(m.result,'$.needs_action')=1")
+        with self.connect() as db:
+            return [dict(r) for r in db.execute('SELECT m.id,m.payload,m.result,m.created FROM messages m WHERE ' +
+                    ' AND '.join(conditions) + ' ORDER BY m.id DESC LIMIT ?', params + [max(1, min(limit, 10))])]
+
+    def start_assistant(self, identity, question, scope):
+        now = time.time()
+        with self.connect() as db:
+            cur = db.execute("INSERT OR IGNORE INTO assistant_runs VALUES (?,?,?,'running',NULL,'[]','',?,?)",
+                             (identity, question, json.dumps(scope, ensure_ascii=False), now, now))
+            if not cur.rowcount:
+                raise ValueError('这个问题已提交，请查看已有结果，不要重复提交。')
+
+    def finish_assistant(self, identity, state, answer, trace, error=''):
+        with self.connect() as db:
+            db.execute('UPDATE assistant_runs SET state=?,answer=?,trace=?,error=?,updated=? WHERE id=? AND state=\'running\'',
+                       (state, json.dumps(answer, ensure_ascii=False) if answer is not None else None,
+                        json.dumps(trace, ensure_ascii=False), error, time.time(), identity))
+
+    def assistant_run(self, identity):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM assistant_runs WHERE id=?', (identity,)).fetchone()
+            return dict(row) if row else None
+
+    def recent_assistants(self):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute('SELECT id,question,state,created FROM assistant_runs ORDER BY created DESC LIMIT 10')]
 
     def cursor(self, account, folder):
         with self.connect() as db:
@@ -274,6 +321,7 @@ class Store:
         with self.connect() as db:
             db.execute("UPDATE replies SET state='unknown',error='程序在发送期间停止，请到原邮箱和收件方核对，勿直接重发。' WHERE state='sending'")
             db.execute("UPDATE agent_runs SET state='failed',error='程序停止，起草未完成，请重新起草。' WHERE state='running'")
+            db.execute("UPDATE assistant_runs SET state='failed',error='程序停止，回答未完成，请重新提问。',updated=? WHERE state='running'", (time.time(),))
 
     def start_agent(self, identity, message_id):
         with self.connect() as db:

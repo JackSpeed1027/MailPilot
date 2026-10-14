@@ -17,6 +17,7 @@ class UIController:
         self.runner = runner
         self.guard = threading.Lock()
         self.settings_lock = threading.Lock()
+        self.assistant_guard = threading.Lock()
         self.stop = threading.Event()
         self.worker = None
         self.managed_names = set()
@@ -234,6 +235,46 @@ class UIController:
                 state, error = 'unknown', '发送流程异常，请核对收件方，勿直接重发。'
             self.store.reply_result(identity, state, error)
 
+    def ask_assistant(self, fields, transport=None):
+        from .assistant import MailAssistant
+        import re
+        allowed = {'csrf', 'question_id', 'question', 'account', 'days', 'action_only'}
+        identity = fields.get('question_id', '')
+        question = fields.get('question', '').strip()
+        if set(fields) - allowed or not re.fullmatch('[0-9a-f]{32}', identity) or not 1 <= len(question) <= 1000:
+            raise ValueError('问题请填写1～1000字，并刷新页面后重新提交。')
+        if fields.get('days') not in {'1', '7', '30', '90'} or fields.get('action_only', 'off') not in {'on', 'off'}:
+            raise ValueError('检索范围无效，请重新选择。')
+        if not self.assistant_guard.acquire(blocking=False):
+            raise ValueError('智能助手正在处理另一个问题，请查看最近的问题并稍后再试。')
+        try:
+            with self.guard:
+                if self.closed:
+                    raise ValueError('程序正在关闭，请稍后重新启动。')
+                cfg = load(self.path)
+                account = fields.get('account', '')
+                if account and not any(a['id'] == account and a['allow_cloud'] for a in cfg['accounts']):
+                    raise ValueError('所选邮箱不存在或未授权云处理。')
+                scope = {'account': account, 'days': int(fields['days']), 'action_only': fields.get('action_only') == 'on'}
+                key = self.credentials.get(cfg['llm']['key_env'], bindings(cfg)[cfg['llm']['key_env']])
+                def current_config():
+                    if self.closed:
+                        raise ValueError('程序正在关闭，助手已停止继续请求。')
+                    return load(self.path)
+                agent = MailAssistant(cfg, self.store, key, **scope,
+                                      current_config=current_config, **({'transport': transport} if transport else {}))
+                self.store.start_assistant(identity, question, scope)
+            try:
+                answer = agent.answer(question)
+                self.store.finish_assistant(identity, 'complete', answer, agent.trace)
+            except ValueError as exc:
+                self.store.finish_assistant(identity, 'failed', None, agent.trace, str(exc))
+            except Exception:
+                self.store.finish_assistant(identity, 'failed', None, agent.trace, '助手处理异常，请重新检查本机状态。')
+            return identity
+        finally:
+            self.assistant_guard.release()
+
     def make_ai_draft(self, message_id, fields, transport=None):
         from .agent import ReplyAgent
         from .reply import account_for, target, save_draft
@@ -301,7 +342,8 @@ def configuration_page(controller, token, error='', submitted=None):
         return f'<label class="check"><input type="checkbox" name="{name}" {"checked" if value else ""}><span>{esc(label)}</span></label>'
     content = ''
     if error:
-        content += f'<div class="notice warn" role="alert">{esc(error)}</div>'
+        saved = error.startswith('配置已保存。')
+        content += f'<div class="notice{" warn" if not saved else ""}" role="{"alert" if not saved else "status"}">{esc(error)}</div>'
     if not cfg['accounts']:
         content += '<p class="small">初次使用：先添加邮箱，再配置摘要模型。微信推送可稍后开启。</p>'
     content += f'<form class="settings" method="post" action="/settings"><input type="hidden" name="csrf" value="{esc(token)}"><input type="hidden" name="revision" value="{esc(revision)}">'
@@ -311,13 +353,13 @@ def configuration_page(controller, token, error='', submitted=None):
         content += f'<details class="mailbox"><summary><span class="account-avatar" aria-hidden="true">{esc(acc["label"][:1])}</span><span><strong>{esc(acc["label"])}</strong><span class="account-address">{esc(acc["email"])}</span></span><span class="account-edit">管理</span></summary><div class="account-fields">'
         content += text('label_' + identity, '显示名称', acc['label'])
         content += text('secret_' + identity, '邮箱授权码 / 应用专用密码', hint=credential_hint(acc['secret_env']) + ' 不会回显。QQ、163 使用 IMAP 授权码，Gmail 使用应用专用密码。', kind='password')
-        content += check('cloud_' + identity, '允许普通邮件正文交给模型摘要、翻译（不含附件）', acc['allow_cloud'])
+        content += check('cloud_' + identity, '允许普通邮件正文用于云端摘要、翻译与智能助手（不含附件）', acc['allow_cloud'])
         content += check('smtp_' + identity, '允许在本机手动发送回复（SMTP）', acc.get('smtp_enabled', False)) + '</div></details>'
     content += '<details class="add-mailbox"' + (' open' if not cfg['accounts'] else '') + '><summary>＋ 添加一个邮箱</summary><div class="field"><label for="new_provider">邮箱服务商</label><select id="new_provider" name="new_provider"><option value="qq">QQ</option><option value="163">163</option><option value="gmail">Gmail</option></select></div>'
     content += text('new_email', '邮箱地址', hint='例如 yourname@qq.com。不添加时留空。', kind='email')
     content += text('new_label', '显示名称', hint='例如个人邮箱。留空使用邮箱地址。')
     content += text('new_secret', '邮箱授权码 / 应用专用密码', hint='需先在邮箱官网启用 IMAP。不是邮箱的普通登录密码。', kind='password')
-    content += check('new_cloud', '允许这个新邮箱的普通邮件云摘要与翻译', False)
+    content += check('new_cloud', '允许这个新邮箱的普通邮件用于云端摘要、翻译与智能助手', False)
     content += check('new_smtp', '允许这个新邮箱在本机手动发送回复（SMTP）', False)
     content += '<p class="small">回复从实际收到邮件的账号发送。请在邮箱官网同时开启 SMTP，使用对应授权码/应用专用密码；这里只启用能力，不会自动发送。第一版仅单人文字回复，不抄送、不附附件。默认使用官方 SMTP 与 TLS 465。</p>'
     content += '<p class="small">设置入口：<a href="https://mail.qq.com/" target="_blank" rel="noreferrer">QQ 邮箱</a> · <a href="https://mail.163.com/" target="_blank" rel="noreferrer">163 邮箱</a> · <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer">Google 应用专用密码</a>。Gmail 需开启两步验证，部分组织账号不可用；连接还需本机网络能够访问 Gmail。</p></details></section>'
@@ -360,7 +402,7 @@ def configuration_page(controller, token, error='', submitted=None):
     content += text('reply_signature', '惯用署名', preferences['signature'], '最多200字，本机添加到智能草稿末尾，不发送给模型。')
     content += text('reply_instructions', '其他回复偏好', preferences['instructions'], '最多500字，例如“先回应对方问题，未确认的时间不要承诺”。不要填写密钥。此说明会交给模型。')
     content += '</div></details><div class="settings-actions"><p class="small">密钥留空，保留已有配置。</p><button class="primary" type="submit">保存并应用配置</button></div></form>'
-    if error:
+    if error and not error.startswith('配置已保存。'):
         # Reveal editable groups without expanding every help paragraph.
         content = content.replace('<details class="mailbox">', '<details open class="mailbox">')
         content = content.replace('<details class="panel setting-group"', '<details open class="panel setting-group"')

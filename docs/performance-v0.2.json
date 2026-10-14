@@ -1,0 +1,74 @@
+{
+  "version": "0.2",
+  "timestamp": "2026-10-12T20:23:01.934289+08:00",
+  "environment": {
+    "python": "3.13.16",
+    "sqlite": "3.50.4",
+    "os": "Windows-11-10.0.26200-SP0",
+    "cpu": "AMD64 Family 25 Model 68 Stepping 1, AuthenticAMD",
+    "logical_cpus": 16
+  },
+  "method": "Single process, 3 warmups, synthetic rows, 20-row pages. Seeding excluded. No IMAP/model/push/network timing.",
+  "datasets": [
+    {
+      "messages": 1000,
+      "measurements": {
+        "all_page": {
+          "p50_ms": 4.781,
+          "p95_ms": 5.356,
+          "samples": 30
+        },
+        "account_page": {
+          "p50_ms": 4.696,
+          "p95_ms": 5.372,
+          "samples": 30
+        },
+        "action_page": {
+          "p50_ms": 7.738,
+          "p95_ms": 8.461,
+          "samples": 30
+        },
+        "keyword_page": {
+          "p50_ms": 9.627,
+          "p95_ms": 10.508,
+          "samples": 30
+        },
+        "dashboard_render": {
+          "p50_ms": 14.674,
+          "p95_ms": 16.392,
+          "samples": 30
+        }
+      }
+    },
+    {
+      "messages": 10000,
+      "measurements": {
+        "all_page": {
+          "p50_ms": 5.966,
+          "p95_ms": 7.045,
+          "samples": 30
+        },
+        "account_page": {
+          "p50_ms": 5.337,
+          "p95_ms": 6.515,
+          "samples": 30
+        },
+        "action_page": {
+          "p50_ms": 29.553,
+          "p95_ms": 32.228,
+          "samples": 30
+        },
+        "keyword_page": {
+          "p50_ms": 48.867,
+          "p95_ms": 53.656,
+          "samples": 30
+        },
+        "dashboard_render": {
+          "p50_ms": 20.234,
+          "p95_ms": 22.313,
+          "samples": 30
+        }
+      }
+    }
+  ]
+}

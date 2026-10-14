@@ -1,15 +1,18 @@
 """Local workbench with paged search, escaped mail and protected settings."""
 import html
 import json
+import re
 import secrets
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from .settings import Settings
+from .mail import readable
 
 STATES = {"received": "待摘要", "processed": "已处理", "duplicate": "重复邮件", "queued": "待推送", "sending": "发送中", "accepted": "通道已接受", "failed": "推送失败", "unknown": "需确认投递", "preview": "仅本机预览"}
 VIEWS = {"all": "全部邮件", "action": "需要行动", "attention": "需要检查", "attachments": "含附件"}
 STYLE = """
+textarea{font:inherit;width:100%;padding:12px;border:1px solid #cbd8ce;border-radius:8px;resize:vertical;line-height:1.8}textarea:focus{outline:3px solid #98bca8;outline-offset:2px}form .primary{margin-top:10px}
 :root{font-family:'Segoe UI','Microsoft YaHei',sans-serif;color:#24332f;background:#f3f5f2;--green:#216653;--muted:#697770;--line:#dfe6df}*{box-sizing:border-box}body{margin:0}a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
 .shell{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh}.sidebar{background:#173f34;color:#e8f1ec;padding:36px 22px;position:sticky;top:0;height:100vh}.logo{font-size:23px;font-weight:750;letter-spacing:1px}.sidebar p{font-size:13px;line-height:1.8;color:#b8cec2}.nav{display:grid;gap:7px;margin-top:35px}.nav a{color:#d5e6dd;padding:12px;border-radius:8px;font-size:14px}.nav a.active{background:#2b5748;color:white}.sidebar .small{margin-top:45px}
 main{max-width:1260px;width:100%;margin:auto;padding:40px 42px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:28px}h1{font-size:30px;letter-spacing:-.8px;margin:6px 0 10px}h2{font-size:19px;margin:10px 0 14px}h3{font-size:15px}.eyebrow{color:var(--green);font-size:12px;font-weight:700;letter-spacing:2px}.muted,.small{color:var(--muted);font-size:13px;line-height:1.7}.button,button{display:inline-block;border:1px solid var(--line);border-radius:8px;padding:11px 17px;background:white;color:var(--green);font:inherit;font-size:14px;cursor:pointer}.primary{background:var(--green);color:white;border-color:var(--green)}
@@ -22,7 +25,7 @@ main{max-width:1260px;width:100%;margin:auto;padding:40px 42px}header{display:fl
 
 
 def esc(value):
-    return html.escape(str(value), quote=True)
+    return html.escape(readable(value), quote=True)
 
 
 def stamp(value):
@@ -110,12 +113,13 @@ def dashboard(store, demo=False, filters=None, cfg=None):
     return layout(content, demo, view, VIEWS[view])
 
 
-def detail_page(row, demo=False):
+def detail_page(row, demo=False, can_reply=False):
     msg = json.loads(row['payload'])
     result = json.loads(row['result']) if row['result'] else {}
     metadata = [('发件人', ', '.join(msg['from_addrs']) or '未提供'), ('邮件头收件地址（To）', ', '.join(msg['to_addrs']) or '未公开，可能密送或转发'), ('抄送（Cc）', ', '.join(msg['cc_addrs']) or '无'), ('实际收件账号', f"{msg['account_label']} <{msg['received_account']}>"), ('邮件标注时间', msg['date_header'] or '未提供'), ('本机接收时间', stamp(row['created'])), ('推送状态', STATES.get(row['delivery_state'], row['delivery_state'] or '尚未生成'))]
     content = '<a class="back" href="/">← 返回邮件列表</a><div class="detail-grid"><div><section class="panel"><div class="eyebrow">SUMMARY</div><h2>中文摘要</h2>'
     content += f'<p class="summary">{esc(result.get("summary_zh", "正在等待摘要"))}</p>'
+    content += f'<p class="small">结果来源：{"大模型生成" if result.get("mode") == "model" else "本机提示，尚无有效模型摘要"}</p>'
     if result.get('key_points'):
         content += '<ul class="points">' + ''.join(f'<li>{esc(p)}</li>' for p in result['key_points']) + '</ul>'
     if result.get('needs_action'):
@@ -158,7 +162,14 @@ def detail_page(row, demo=False):
         content += '<p class="small">没有附件或未获取到附件信息。</p>'
     if row.get('delivery_error'):
         content += f'<p class="bad">{esc(row["delivery_error"])} · 推送任务 {row["outbox_id"]}</p>'
-    return layout(content + '</section></div></div>', demo, title=msg['subject'], subtitle='中文摘要、全文译文和原文分开展示，来源信息清楚可查。')
+    content += '</section>'
+    if can_reply:
+        content += f'<section class="panel"><h2>回复这封邮件</h2><p class="small">使用实际收件账号回复。先写草稿、核对全文，再手动发送。</p><a class="button primary" href="/messages/{row["id"]}/reply">写回复 / 智能起草</a>'
+        for draft in row.get('replies', []):
+            from .reply import REPLY_STATES
+            content += f'<p><a href="/replies/{esc(draft["id"])}">{esc(REPLY_STATES[draft["state"]])} · {esc(draft["subject"])}</a></p>'
+        content += '</section>'
+    return layout(content + '</div></div>', demo, title=msg['subject'], subtitle='中文摘要、全文译文和原文分开展示，来源信息清楚可查。')
 
 
 def settings_page(cfg=None, revision='', token='', editable=False, demo=False, error=''):
@@ -204,6 +215,38 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 return
             self.respond(settings_page(cfg, revision, token, editable, demo, error), 'text/html; charset=utf-8', status)
 
+        def reply_view(self, path, error='', status=200, submitted=None):
+            if not controller:
+                self.send_error(403)
+                return
+            from .reply import compose_page, review_page
+            match = re.fullmatch(r'/messages/(\d+)/reply(?:/ai)?', path)
+            if match:
+                row = store.detail(int(match[1]))
+                if not row:
+                    self.send_error(404)
+                    return
+                draft = None
+                if submitted and re.fullmatch('[0-9a-f]{32}', submitted.get('draft_id', '')):
+                    draft = {'id': submitted['draft_id'], 'revision': submitted.get('revision', '0'),
+                             'subject': submitted.get('subject', ''), 'body': submitted.get('body', '')}
+                self.respond(compose_page(row, controller.read()[0], token, draft=draft, error=error), 'text/html; charset=utf-8', status)
+                return
+            match = re.fullmatch(r'/replies/([0-9a-f]{32})(?:/send)?', path)
+            draft = store.reply(match[1]) if match else None
+            if not draft:
+                self.send_error(404)
+                return
+            if parse_qs(urlparse(self.path).query).get('edit') == ['1'] and draft['state'] == 'draft':
+                row = store.detail(draft['message_id'])
+                page = compose_page(row, controller.read()[0], token, draft=draft, error=error)
+            else:
+                run = store.agent_run(draft['id'])
+                if run:
+                    draft['agent_trace'] = json.loads(run['trace'])
+                page = review_page(draft, token, error)
+            self.respond(page, 'text/html; charset=utf-8', status)
+
         def do_GET(self):
             if not self.local_host():
                 self.send_error(403)
@@ -226,10 +269,13 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 if controller:
                     state['runtime'] = controller.status
                 self.respond(json.dumps(state, ensure_ascii=False), 'application/json; charset=utf-8')
+            elif re.fullmatch(r'/messages/\d+/reply(?:/ai)?|/replies/[0-9a-f]{32}', target.path):
+                self.reply_view(target.path)
             elif target.path.startswith('/messages/') and target.path[10:].isdigit() and len(target.path) < 30:
                 row = store.detail(int(target.path[10:]))
                 if row:
-                    self.respond(detail_page(row, demo), 'text/html; charset=utf-8')
+                    row['replies'] = store.replies_for(row['id']) if controller else []
+                    self.respond(detail_page(row, demo, bool(controller)), 'text/html; charset=utf-8')
                 else:
                     self.send_error(404)
             else:
@@ -239,7 +285,9 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
             if not self.local_host() or not editable:
                 self.send_error(403)
                 return
-            if urlparse(self.path).path != '/settings':
+            path = urlparse(self.path).path
+            reply_route = bool(controller and re.fullmatch(r'/messages/\d+/reply(?:/ai)?|/replies/[0-9a-f]{32}/send', path))
+            if path != '/settings' and not reply_route:
                 self.send_error(404)
                 return
             if self.headers.get('Origin') != 'http://' + self.headers.get('Host', ''):
@@ -250,7 +298,7 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if not 1 <= length <= 32768:
+                if not 1 <= length <= (262144 if reply_route else 32768):
                     self.send_error(413)
                     return
                 values = parse_qs(self.rfile.read(length).decode('utf-8'), keep_blank_values=True, max_num_fields=200)
@@ -261,15 +309,46 @@ def make_server(store, port=8788, demo=False, config_path=None, on_settings_save
                 if not secrets.compare_digest(fields.get('csrf', ''), token):
                     self.send_error(403)
                     return
+                if reply_route:
+                    from .reply import save_draft
+                    compose = re.fullmatch(r'/messages/(\d+)/reply', path)
+                    ai = re.fullmatch(r'/messages/(\d+)/reply/ai', path)
+                    if compose:
+                        identity = save_draft(store, controller.read()[0], int(compose[1]), fields)
+                    elif ai:
+                        identity = controller.make_ai_draft(int(ai[1]), fields)
+                    else:
+                        identity = path.split('/')[2]
+                        if set(fields) != {'csrf', 'revision'}:
+                            raise ValueError('发送确认中包含无效字段。')
+                        controller.send_reply(identity, int(fields['revision']))
+                    self.send_response(303)
+                    self.send_header('Location', '/replies/' + identity)
+                    self.send_header('Content-Length', '0')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.end_headers()
+                    return
                 if controller:
                     controller.save(fields)
                 else:
                     settings.save(fields)
             except (ValueError, UnicodeError) as exc:
+                if reply_route:
+                    self.reply_view(path, '操作未完成：' + (str(exc) if isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else '字段编码无效，请重新填写。'), 400, submitted=fields if path.endswith('/reply') else None)
+                    return
                 self.settings_view(('未保存：' + str(exc)) if controller and isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else '未保存：字段格式无效或配置已被修改。请刷新后检查备注、间隔、上限和摘要风格。', 400)
                 return
             except OSError:
+                if reply_route:
+                    self.reply_view(path, '本机保存失败，请检查磁盘权限或空间；不要重复发送，先核对草稿状态。', 500)
+                    return
                 self.settings_view('未保存：配置无法写入，请检查目录权限与磁盘空间。', 500)
+                return
+            except Exception:
+                if reply_route:
+                    self.reply_view(path, '处理异常。请核对草稿与发送状态；结果不确定时不要直接重发。', 500)
+                else:
+                    self.settings_view('配置处理异常，请检查本机状态后重试。', 500)
                 return
             if controller:
                 self.settings_view('配置已保存。系统正在应用；请稍后刷新查看运行状态。密钥不会回显。')

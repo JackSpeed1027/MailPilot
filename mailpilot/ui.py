@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from .config import example, load, required_secrets, PROVIDERS
 from .credentials import Credentials, WindowsVault, bindings
-from .runtime import run_forever
+from .runtime import run_forever, worker_lock
 from .store import Store
 
 
@@ -30,6 +30,11 @@ class UIController:
         cfg, _ = self.read()
         data = cfg.get('data_dir', 'data')
         self.store = Store((self.path.parent / data).resolve())
+        try:
+            with worker_lock((self.path.parent / data).resolve()):
+                self.store.recover_replies()
+        except ValueError:
+            pass
         if self.path.exists():
             cfg = load(self.path)
             for name, binding in bindings(cfg).items():
@@ -57,20 +62,22 @@ class UIController:
             allowed = {'csrf', 'revision', 'poll_seconds', 'daily_attempt_limit', 'summary_style',
                        'llm_enabled', 'base_url', 'model', 'model_key', 'channel_enabled', 'uid',
                        'app_token', 'remember', 'translation_enabled', 'translation_max_chars',
-                       'new_provider', 'new_email', 'new_label', 'new_secret', 'new_cloud'}
+                       'new_provider', 'new_email', 'new_label', 'new_secret', 'new_cloud', 'new_smtp',
+                       'reply_tone', 'reply_length', 'reply_language', 'reply_signature', 'reply_instructions'}
             secret_values = {}
             for acc in cfg['accounts']:
                 identity = acc['id']
-                allowed.update({'label_' + identity, 'cloud_' + identity, 'secret_' + identity})
+                allowed.update({'label_' + identity, 'cloud_' + identity, 'secret_' + identity, 'smtp_' + identity})
                 acc['label'] = fields.get('label_' + identity, '').strip()
                 if not 1 <= len(acc['label']) <= 60:
                     raise ValueError('邮箱显示名称请填写 1～60 个字符，例如工作邮箱。')
                 acc['allow_cloud'] = fields.get('cloud_' + identity) == 'on'
+                acc['smtp_enabled'] = fields.get('smtp_' + identity) == 'on'
                 secret_values[acc['secret_env']] = fields.get('secret_' + identity, '').strip()
             if set(fields) - allowed:
                 raise ValueError('页面包含不支持的设置，请刷新后重试。')
             for key in allowed:
-                if key.endswith('_enabled') or key in {'remember', 'new_cloud'} or key.startswith('cloud_'):
+                if key.endswith('_enabled') or key in {'remember', 'new_cloud', 'new_smtp'} or key.startswith(('cloud_', 'smtp_')):
                     if fields.get(key, 'off') not in {'on', 'off'}:
                         raise ValueError('开关格式无效，请刷新页面。')
             if fields.get('new_email', '').strip():
@@ -89,7 +96,8 @@ class UIController:
                 if len(label) > 60:
                     raise ValueError('新邮箱显示名称不能超过 60 个字符。')
                 cfg['accounts'].append(dict(id=identity, provider=provider, email=email,
-                                            label=label, secret_env=name, allow_cloud=fields.get('new_cloud') == 'on'))
+                                            label=label, secret_env=name, allow_cloud=fields.get('new_cloud') == 'on',
+                                            smtp_enabled=fields.get('new_smtp') == 'on'))
                 secret_values[name] = fields.get('new_secret', '').strip()
             try:
                 cfg['poll_seconds'] = int(fields['poll_seconds'])
@@ -102,6 +110,10 @@ class UIController:
                        model=fields.get('model', '').strip(), summary_style=fields.get('summary_style', 'balanced'),
                        translation_enabled=fields.get('translation_enabled') == 'on')
             channel.update(enabled=fields.get('channel_enabled') == 'on', uid=fields.get('uid', '').strip())
+            if 'reply_tone' in fields:
+                cfg['reply_preferences'] = dict(tone=fields.get('reply_tone'), length=fields.get('reply_length'),
+                    language=fields.get('reply_language'), signature=fields.get('reply_signature', '').strip(),
+                    instructions=fields.get('reply_instructions', '').strip())
             secret_values[llm['key_env']] = fields.get('model_key', '').strip()
             secret_values[channel['token_env']] = fields.get('app_token', '').strip()
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +210,68 @@ class UIController:
             os.environ.pop(name, None)
         self.credentials.session.clear()
 
+    def send_reply(self, identity, revision, sender=None):
+        from .reply import account_for, target, smtp_send
+        with self.guard:
+            if self.closed:
+                raise ValueError('程序正在关闭，请重新启动后操作。')
+            cfg = load(self.path)
+            draft = self.store.reply(identity)
+            if not draft:
+                raise ValueError('草稿不存在。')
+            row = self.store.detail(draft['message_id'])
+            original = json.loads(row['payload'])
+            account = account_for(cfg, original)
+            if draft['sender'] != account['email'] or draft['recipient'] != target(original):
+                raise ValueError('回复来源或目标已变化，请重新生成草稿。')
+            password = self.credentials.get(account['secret_env'], bindings(cfg)[account['secret_env']])
+            if not password:
+                raise ValueError('缺少此邮箱的授权码，请到设置页补充。')
+            claimed = self.store.claim_reply(identity, revision)
+            try:
+                state, error = (sender or smtp_send)(account, password, claimed, original)
+            except Exception:
+                state, error = 'unknown', '发送流程异常，请核对收件方，勿直接重发。'
+            self.store.reply_result(identity, state, error)
+
+    def make_ai_draft(self, message_id, fields, transport=None):
+        from .agent import ReplyAgent
+        from .reply import account_for, target, save_draft
+        import re
+        if set(fields) != {'csrf', 'draft_id'} or not re.fullmatch('[0-9a-f]{32}', fields.get('draft_id', '')):
+            raise ValueError('智能起草表单无效，请刷新。')
+        with self.guard:
+            if self.closed:
+                raise ValueError('程序正在关闭。')
+            cfg = load(self.path)
+            row = self.store.detail(message_id)
+            if not row:
+                raise ValueError('原邮件不存在。')
+            message = json.loads(row['payload'])
+            account = account_for(cfg, message)
+            target(message)
+            message['allow_cloud'] = bool(message.get('allow_cloud') and account['allow_cloud'])
+            key = self.credentials.get(cfg['llm']['key_env'], bindings(cfg)[cfg['llm']['key_env']])
+            agent = ReplyAgent(cfg['llm'], self.store, key, **({'transport': transport} if transport else {}))
+            identity = fields['draft_id']
+            if self.store.reply(identity):
+                raise ValueError('草稿编号已存在，请返回邮件查看草稿或重新打开起草页。')
+            self.store.start_agent(identity, message_id)
+            try:
+                result = agent.draft(message, cfg['reply_preferences'])
+                signature = cfg['reply_preferences']['signature']
+                if signature:
+                    result['body'] += '\n\n' + signature
+                identity = save_draft(self.store, cfg, message_id, dict(csrf=fields['csrf'], draft_id=identity, revision='0', **result))
+                self.store.finish_agent(identity, 'complete', agent.trace)
+                return identity
+            except ValueError as exc:
+                self.store.finish_agent(identity, 'failed', agent.trace, str(exc))
+                raise
+            except Exception:
+                self.store.finish_agent(identity, 'failed', agent.trace, '智能起草处理失败，请检查本机状态。')
+                raise ValueError('智能起草未完成；请检查本机状态后手动写回复。') from None
+
 
 def configuration_page(controller, token, error=''):
     from .web import esc, layout
@@ -227,14 +301,19 @@ def configuration_page(controller, token, error=''):
         content += text('label_' + identity, '显示名称', acc['label'])
         content += text('secret_' + identity, '邮箱授权码 / 应用专用密码', hint=credential_hint(acc['secret_env']) + ' 不会回显。QQ、163 使用 IMAP 授权码，Gmail 使用应用专用密码。', kind='password')
         content += check('cloud_' + identity, '允许普通邮件正文交给模型摘要、翻译（不含附件）', acc['allow_cloud']) + '</div>'
+        content += check('smtp_' + identity, '允许在本机手动发送回复（SMTP）', acc.get('smtp_enabled', False))
     content += '<h3>添加一个邮箱</h3><div class="field"><label for="new_provider">邮箱服务商</label><select id="new_provider" name="new_provider"><option value="qq">QQ</option><option value="163">163</option><option value="gmail">Gmail</option></select></div>'
     content += text('new_email', '邮箱地址', hint='例如 yourname@qq.com。不添加时留空。', kind='email')
     content += text('new_label', '显示名称', hint='例如个人邮箱。留空使用邮箱地址。')
     content += text('new_secret', '邮箱授权码 / 应用专用密码', hint='需先在邮箱官网启用 IMAP。不是邮箱的普通登录密码。', kind='password')
     content += check('new_cloud', '允许这个新邮箱的普通邮件云摘要与翻译', False)
+    content += check('new_smtp', '允许这个新邮箱在本机手动发送回复（SMTP）', False)
+    content += '<p class="small">回复从实际收到邮件的账号发送。请在邮箱官网同时开启 SMTP，使用对应授权码/应用专用密码；这里只启用能力，不会自动发送。第一版仅单人文字回复，不抄送、不附附件。默认使用官方 SMTP 与 TLS 465。</p>'
     content += '<p class="small">设置入口：<a href="https://mail.qq.com/" target="_blank" rel="noreferrer">QQ 邮箱</a> · <a href="https://mail.163.com/" target="_blank" rel="noreferrer">163 邮箱</a> · <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer">Google 应用专用密码</a>。Gmail 需开启两步验证，部分组织账号不可用；连接还需本机网络能够访问 Gmail。</p></section>'
     llm = cfg['llm']
     content += '<section class="panel"><h2>2. 模型 API 与外文阅读</h2>'
+    diagnostics = controller.store.model_diagnostics()
+    content += f'<div class="notice">本机今日（{esc(diagnostics["day"])}）模型尝试 {diagnostics["attempts"]} 次，收到接口响应 {diagnostics["responses"]} 次。摘要、翻译和智能起草共享统计。这里不是服务商账单，也不代表每次输出都通过校验。</div>'
     content += check('llm_enabled', '启用模型（邮箱也要勾选云处理授权）', llm['enabled'])
     content += text('base_url', 'API 基础地址', llm['base_url'], '使用兼容 OpenAI Chat Completions 的 HTTPS 基础地址，例如 https://api.deepseek.com/v1；不要填写完整 /chat/completions 路径。')
     content += text('model', '模型名称', llm['model'], '填写服务商支持的名称。DeepSeek 当前可选 deepseek-flash；已有模型名称可以保留。')
@@ -255,5 +334,17 @@ def configuration_page(controller, token, error=''):
     content += '<section class="panel"><h2>4. 收件与凭据保存</h2>'
     content += text('poll_seconds', '检查新邮件间隔（秒）', cfg['poll_seconds'], '建议 60；范围 15～3600。第一次连接跳过旧邮件，只收之后的新邮件。', 'number')
     content += check('remember', '将本次新输入的密钥保存到 Windows 凭据管理器', False)
-    content += '<p class="small">默认仅本次运行使用；关闭程序后需重填。勾选后下次可自动读取，保存在当前 Windows 用户凭据中；不会写入 config.json，也不会在页面显示。留空不会修改已有凭据。若要将已保存密钥改为仅本次，请重新输入并取消勾选。也可在 Windows“凭据管理器 → Windows 凭据”中删除 MailPilot/ 条目。</p><p class="small">当前附件只显示名称，不解析图片或文件。配置保存不会自动重算旧邮件；已发出的请求无法撤回。</p></section><button class="primary" type="submit">保存并应用配置</button></form>'
+    content += '<p class="small">默认仅本次运行使用；关闭程序后需重填。勾选后下次可自动读取，保存在当前 Windows 用户凭据中；不会写入 config.json，也不会在页面显示。留空不会修改已有凭据。若要将已保存密钥改为仅本次，请重新输入并取消勾选。也可在 Windows“凭据管理器 → Windows 凭据”中删除 MailPilot/ 条目。</p><p class="small">当前附件只显示名称，不解析图片或文件。配置保存不会自动重算旧邮件；已发出的请求无法撤回。</p></section>'
+    preferences = cfg.get('reply_preferences', dict(tone='professional', length='balanced', language='same', signature='', instructions=''))
+    content += '<section class="panel"><h2>5. 智能回复偏好</h2><p class="small">这是你明确设置的习惯，不会自动扫描历史邮件学习。仅点击“按我的偏好智能起草”时调用模型，最多3轮，与摘要/翻译共享每日上限。模型只有读取当前邮件和读取偏好两个工具，没有发信工具。</p>'
+    for name, label, values in [('tone', '回复语气', [('professional', '专业礼貌'), ('friendly', '亲切自然')]),
+                                ('length', '回复长度', [('brief', '简短'), ('balanced', '均衡'), ('detailed', '详细')]),
+                                ('language', '回复语言', [('same', '跟随原邮件'), ('zh', '中文'), ('en', '英文')])]:
+        content += f'<div class="field"><label for="reply_{name}">{label}</label><select id="reply_{name}" name="reply_{name}">'
+        for value, caption in values:
+            content += f'<option value="{value}" {"selected" if preferences[name] == value else ""}>{caption}</option>'
+        content += '</select></div>'
+    content += text('reply_signature', '惯用署名', preferences['signature'], '最多200字，本机添加到智能草稿末尾，不发送给模型。')
+    content += text('reply_instructions', '其他回复偏好', preferences['instructions'], '最多500字，例如“先回应对方问题，未确认的时间不要承诺”。不要填写密钥。此说明会交给模型。')
+    content += '</section><button class="primary" type="submit">保存并应用配置</button></form>'
     return layout(content, title='邮箱与 API 配置', active='settings', subtitle='在页面完成配置；密钥不回显，保存后自动应用。')

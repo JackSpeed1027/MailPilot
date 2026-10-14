@@ -22,7 +22,7 @@ AUTH_LINK = re.compile(
 
 def sensitive_reason(subject, alternatives):
     # Inspect decoded text, including hidden alternatives, not CSS class names or URLs alone.
-    source_text = html_module.unescape("\n".join([subject, *alternatives]))
+    source_text = readable("\n".join([subject, *alternatives]))
     text = re.sub(r"<[^>]*>", " ", source_text)
     for match in AUTH_CODE.finditer(text):
         nearby = text[max(0, match.start() - 80):match.end() + 160]
@@ -70,8 +70,19 @@ class TextHTML(HTMLParser):
             self.parts.append(text)
 
 
+def readable(text):
+    """Decode encoded punctuation/spacing as text; rendering must still escape HTML."""
+    text = str(text)
+    for _ in range(3):
+        decoded = html_module.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text.replace('\xa0', ' ').replace('\u202f', ' ').replace('\x00', '')
+
+
 def clean(text):
-    text = text.replace("\x00", "")
+    text = readable(text)
     return re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", text).strip()
 
 
@@ -81,7 +92,7 @@ def addresses(msg, name):
 
 def parse(raw, account, uidvalidity, uid):
     msg = BytesParser(policy=policy.default).parsebytes(raw)
-    subject = str(msg.get("Subject", "（无主题）"))
+    subject = readable(msg.get("Subject", "（无主题）"))
     plain, html, attachments = [], [], []
     for part in msg.walk():
         if part.is_multipart():
@@ -117,6 +128,8 @@ def parse(raw, account, uidvalidity, uid):
         "uidvalidity": str(uidvalidity), "uid": int(uid), "message_id": mid,
         "fingerprint": fingerprint, "from_addrs": from_addrs,
         "to_addrs": to_addrs, "cc_addrs": cc_addrs,
+        "reply_to_addrs": addresses(msg, 'Reply-To'),
+        "references": str(msg.get('References', ''))[:4000],
         "subject": "验证／登录类邮件（敏感内容已隐藏）" if sensitive else subject[:500],
         "body": "" if sensitive else body[:100000],
         "body_truncated": not sensitive and len(body) > 100000,
@@ -171,6 +184,7 @@ def restore_translation(text, mapping):
 
 def model_text(text):
     """Reduce common PII; this is not a guarantee of full anonymization."""
+    text = readable(text)
     text = re.sub(r"https?://\S+", "[链接已省略]", text)
     text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[邮箱已隐藏]", text)
     text = re.sub(r"(?<!\d)\d{11,19}(?!\d)", "[长号码已隐藏]", text)

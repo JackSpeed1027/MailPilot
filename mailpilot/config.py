@@ -6,13 +6,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 PROVIDERS = {"qq": "imap.qq.com", "163": "imap.163.com", "gmail": "imap.gmail.com"}
+SMTP_HOSTS = {'qq': 'smtp.qq.com', '163': 'smtp.163.com', 'gmail': 'smtp.gmail.com'}
 
 
 def example():
     return {
         "accounts": [
             {"id": provider, "provider": provider, "label": label, "email": email,
-             "secret_env": env, "allow_cloud": False}
+             "secret_env": env, "allow_cloud": False, "smtp_enabled": False}
             for provider, label, email, env in [
                 ("qq", "QQ 主邮箱", "you@qq.com", "MAILPILOT_QQ_SECRET"),
                 ("163", "163 邮箱", "you@163.com", "MAILPILOT_163_SECRET"),
@@ -20,6 +21,7 @@ def example():
             ]
         ],
         "poll_seconds": 60, "data_dir": "data", "max_message_bytes": 2_000_000,
+        'reply_preferences': {'tone': 'professional', 'length': 'balanced', 'language': 'same', 'signature': '', 'instructions': ''},
         "llm": {"enabled": True, "base_url": "https://api.deepseek.com/v1",
                 "model": "deepseek-chat", "key_env": "MAILPILOT_LLM_KEY",
                 "daily_attempt_limit": 100, "summary_style": "balanced", "translation_enabled": True,
@@ -55,6 +57,12 @@ def load(path):
         acc.setdefault("folder", "INBOX")
         acc.setdefault("port", 993)
         acc.setdefault("allow_cloud", False)
+        acc.setdefault('smtp_enabled', False)
+        acc.setdefault('smtp_host', SMTP_HOSTS.get(acc.get('provider'), ''))
+        if type(acc['smtp_enabled']) is not bool:
+            raise ValueError('smtp_enabled 应为 true 或 false')
+        if acc['smtp_enabled'] and (acc.get('provider') not in SMTP_HOSTS or acc['smtp_host'] != SMTP_HOSTS.get(acc.get('provider'))):
+            raise ValueError('当前回复只支持 QQ、163、Gmail 的官方 SMTP 服务器')
         if type(acc["allow_cloud"]) is not bool:
             raise ValueError("allow_cloud 应为 true 或 false")
         if not all(isinstance(acc.get(k), str) and acc[k] for k in ("label", "folder")):
@@ -111,6 +119,16 @@ def load(path):
     if len(names) != len(set(names)):
         raise ValueError('每个邮箱、模型和推送必须使用独立的凭据名称')
     cfg["data_dir"] = str((path.parent / cfg.get("data_dir", "data")).resolve())
+    defaults = {'tone': 'professional', 'length': 'balanced', 'language': 'same', 'signature': '', 'instructions': ''}
+    preferences = cfg.setdefault('reply_preferences', defaults.copy())
+    if not isinstance(preferences, dict):
+        raise ValueError('回复偏好格式无效')
+    for name, value in defaults.items():
+        preferences.setdefault(name, value)
+    if preferences['tone'] not in ('professional', 'friendly') or preferences['length'] not in ('brief', 'balanced', 'detailed') or preferences['language'] not in ('same', 'zh', 'en'):
+        raise ValueError('回复语气、长度或语言无效')
+    if any(not isinstance(preferences[key], str) or len(preferences[key]) > limit for key, limit in [('signature', 200), ('instructions', 500)]):
+        raise ValueError('回复署名最多200字，偏好说明最多500字')
     return cfg
 
 

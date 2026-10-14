@@ -6,7 +6,7 @@ import urllib.request
 from urllib.parse import urlparse
 
 from .config import secret
-from .mail import guess_language, model_text
+from .mail import guess_language, model_text, readable
 from .translation import translate
 
 
@@ -208,7 +208,7 @@ def render(message, result):
             half = room // 2
             content += '\n\n中文译文（节选/状态）：\n' + (translated or result.get('translation_note', '未生成翻译'))[:half]
             content += '\n\n正文原文（节选）：\n' + message['body'][:half] + note
-    return content[:6000], preview
+    return readable(content)[:6000], readable(preview)
 
 
 class WxPusher:

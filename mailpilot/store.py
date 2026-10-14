@@ -33,6 +33,14 @@ class Store:
                 CREATE TABLE IF NOT EXISTS health (
                     name TEXT PRIMARY KEY, ok INTEGER, updated REAL, error TEXT);
                 CREATE INDEX IF NOT EXISTS messages_account_id ON messages(account,id DESC);
+                CREATE TABLE IF NOT EXISTS replies (
+                    id TEXT PRIMARY KEY, message_id INTEGER, account TEXT, sender TEXT,
+                    recipient TEXT, subject TEXT, body TEXT, mail_id TEXT,
+                    revision INTEGER DEFAULT 1, state TEXT DEFAULT 'draft', error TEXT DEFAULT '',
+                    created REAL, updated REAL);
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY, message_id INTEGER, state TEXT, trace TEXT, error TEXT,
+                    created REAL, updated REAL);
             """)
 
     @contextmanager
@@ -218,3 +226,74 @@ class Store:
             row = db.execute("""SELECT m.*,o.id AS outbox_id,o.state AS delivery_state,o.error AS delivery_error
                 FROM messages m LEFT JOIN outbox o ON o.message_id=m.id WHERE m.id=?""", (message_id,)).fetchone()
             return dict(row) if row else None
+
+    def save_reply(self, identity, message_id, sender, recipient, subject, body, account, revision=0):
+        from email.utils import make_msgid
+        now = time.time()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM replies WHERE id=?', (identity,)).fetchone()
+            if old:
+                if old['state'] != 'draft' or old['revision'] != revision or old['message_id'] != message_id:
+                    raise ValueError('草稿已被修改或发送，请重新打开邮件确认。')
+                db.execute('UPDATE replies SET subject=?,body=?,revision=revision+1,updated=? WHERE id=?',
+                           (subject, body, now, identity))
+            else:
+                if revision != 0:
+                    raise ValueError('草稿不存在，请重新打开邮件。')
+                db.execute('INSERT INTO replies(id,message_id,account,sender,recipient,subject,body,mail_id,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                           (identity, message_id, account, sender, recipient, subject, body,
+                            make_msgid(domain=sender.split('@')[-1]), now, now))
+
+    def reply(self, identity):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM replies WHERE id=?', (identity,)).fetchone()
+            return dict(row) if row else None
+
+    def replies_for(self, message_id):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute('SELECT * FROM replies WHERE message_id=? ORDER BY created DESC LIMIT 20', (message_id,))]
+
+    def claim_reply(self, identity, revision):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM replies WHERE id=?', (identity,)).fetchone()
+            if not row or row['state'] != 'draft' or row['revision'] != revision:
+                raise ValueError('这份草稿已变化或已提交发送，不能重复发送。')
+            db.execute("UPDATE replies SET state='sending',updated=? WHERE id=?", (time.time(), identity))
+            return dict(row)
+
+    def reply_result(self, identity, state, error=''):
+        if state not in ('accepted', 'failed', 'unknown'):
+            raise ValueError('未知回复状态')
+        with self.connect() as db:
+            db.execute("UPDATE replies SET state=?,error=?,updated=? WHERE id=? AND state='sending'",
+                       (state, error, time.time(), identity))
+
+    def recover_replies(self):
+        with self.connect() as db:
+            db.execute("UPDATE replies SET state='unknown',error='程序在发送期间停止，请到原邮箱和收件方核对，勿直接重发。' WHERE state='sending'")
+            db.execute("UPDATE agent_runs SET state='failed',error='程序停止，起草未完成，请重新起草。' WHERE state='running'")
+
+    def start_agent(self, identity, message_id):
+        with self.connect() as db:
+            inserted = db.execute("INSERT OR IGNORE INTO agent_runs VALUES (?,?,'running','[]','',?,?)",
+                                  (identity, message_id, time.time(), time.time())).rowcount
+            if not inserted:
+                raise ValueError('这次智能起草已提交。请回原邮件查看草稿，或重新打开起草页。')
+
+    def finish_agent(self, identity, state, trace, error=''):
+        with self.connect() as db:
+            db.execute('UPDATE agent_runs SET state=?,trace=?,error=?,updated=? WHERE id=?',
+                       (state, json.dumps(trace, ensure_ascii=False), error, time.time(), identity))
+
+    def agent_run(self, identity):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM agent_runs WHERE id=?', (identity,)).fetchone()
+            return dict(row) if row else None
+
+    def model_diagnostics(self):
+        day = datetime.now().astimezone().strftime('%Y-%m-%d')
+        with self.connect() as db:
+            row = db.execute('SELECT COUNT(*) attempts,COALESCE(SUM(ok),0) responses FROM model_usage WHERE day=?', (day,)).fetchone()
+            return dict(day=day, **dict(row))

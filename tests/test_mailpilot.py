@@ -376,7 +376,7 @@ class ConfigWebCLITests(BaseCase):
         path = Path(self.temp.name) / "config.json"
         path.write_text(json.dumps(cfg), encoding="utf-8")
         loaded = load(path)
-        self.assertEqual(loaded["data_dir"], str(Path(self.temp.name) / "data"))
+        self.assertEqual(Path(loaded["data_dir"]).resolve(), (Path(self.temp.name) / "data").resolve())
         self.assertFalse(loaded["accounts"][0]["allow_cloud"])
 
     def test_config_rejects_plain_http_and_broadcast_uid(self):
